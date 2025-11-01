@@ -1,32 +1,37 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:mobile_ai_photo_editor/core/services/di_container.dart';
-import 'package:mobile_ai_photo_editor/features/presentation/bloc/editor_cubit.dart';
+import 'features/presentation/bloc/editor_cubit.dart';
 import 'package:mobile_ai_photo_editor/features/screens/editor_screen.dart';
-import 'package:mobile_ai_photo_editor/shared/styles/app_theme.dart';
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await initDependencies();
-  runApp(const EditorApp());
+void main() {
+  runApp(const MyApp());
 }
 
-class EditorApp extends StatelessWidget {
-  const EditorApp({super.key});
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return MultiBlocProvider(
-      providers: [
-        BlocProvider<EditorCubit>(create: (_) => sl<EditorCubit>()),
-      ],
+    return BlocProvider(
+      create: (context) => EditorCubit(),
       child: MaterialApp(
+        title: 'Professional AI Photo Editor',
         debugShowCheckedModeBanner: false,
-        title: 'Mobile AI Photo Editor',
-        theme: buildAppTheme(),
+        theme: ThemeData(
+          useMaterial3: true,
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: Colors.blue,
+            brightness: Brightness.light,
+          ),
+          appBarTheme: const AppBarTheme(
+            backgroundColor: Colors.white,
+            foregroundColor: Colors.black87,
+            elevation: 2,
+            centerTitle: true,
+          ),
+        ),
         home: const EditorScreen(),
       ),
     );
   }
 }
-

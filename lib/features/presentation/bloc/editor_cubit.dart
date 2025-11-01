@@ -1,938 +1,884 @@
 import 'dart:typed_data';
 import 'dart:math' as math;
+import 'dart:async';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
+import 'package:image/image.dart' as img;
 import 'editor_state.dart';
 
-enum ExportFormat { jpeg, png, webp }
+class _ImageAnalysis {
+  final bool isDark;
+  final bool isLowContrast;
+  final bool isLowSaturation;
+  final double averageBrightness;
+
+  _ImageAnalysis({
+    required this.isDark,
+    required this.isLowContrast,
+    required this.isLowSaturation,
+    required this.averageBrightness,
+  });
+}
 
 class EditorCubit extends Cubit<EditorState> {
   EditorCubit() : super(const EditorState());
 
   final ImagePicker _picker = ImagePicker();
-
-  // internal undo/redo & presets (kept in memory)
   final List<Uint8List> _history = [];
   int _historyIndex = -1;
-  final List<Map<String, dynamic>> _presets = [];
+  static const int _maxHistorySize = 20;
 
-  // --- helpers -------------------------------------------------------------
-  void _pushHistory(Uint8List bytes) {
-    if (_historyIndex < _history.length - 1) {
-      _history.removeRange(_historyIndex + 1, _history.length);
-    }
-    _history.add(bytes);
-    _historyIndex = _history.length - 1;
-  }
-
-  void undo() {
-    if (_historyIndex > 0) {
-      _historyIndex--;
-      final b = _history[_historyIndex];
-      emit(state.copyWith(editedBytes: b, status: EditorStatus.ready));
-    }
-  }
-
-  void redo() {
-    if (_historyIndex < _history.length - 1) {
-      _historyIndex++;
-      final b = _history[_historyIndex];
-      emit(state.copyWith(editedBytes: b, status: EditorStatus.ready));
-    }
-  }
-
-  void savePreset(String id, Map<String, dynamic> config) {
-    _presets.removeWhere((p) => p['id'] == id);
-    _presets.add({'id': id, 'config': config});
-  }
-
-  List<Map<String, dynamic>> listPresets() => List.unmodifiable(_presets);
-
-  Future<void> applyPreset(String id) async {
-    final p = _presets.firstWhere((e) => e['id'] == id, orElse: () => {});
-    if (p.isEmpty) return;
-    final cfg = p['config'] as Map<String, dynamic>;
-    if (cfg.containsKey('filterId'))
-      await applyFilter(cfg['filterId'] as String);
-    if (cfg.containsKey('brightness') ||
-        cfg.containsKey('contrast') ||
-        cfg.containsKey('saturation')) {
-      updateAdjustments(
-        brightness: cfg['brightness']?.toDouble(),
-        contrast: cfg['contrast']?.toDouble(),
-        saturation: cfg['saturation']?.toDouble(),
-      );
-      await applyAdjustments();
-    }
-    if (cfg.containsKey('vignette'))
-      await lensVignette(cfg['vignette'] as double);
-  }
-
+  // === IMAGE PICKING ===
   Future<void> pickImage() async {
     try {
       emit(state.copyWith(status: EditorStatus.loading));
-      final XFile? file = await _picker.pickImage(source: ImageSource.gallery);
+
+      final file = await _picker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 2048,
+        maxHeight: 2048,
+        imageQuality: 90,
+      );
+
       if (file == null) {
         emit(state.copyWith(status: EditorStatus.initial));
         return;
       }
-      final rawBytes = await file.readAsBytes();
-      final img.Image? decoded = img.decodeImage(rawBytes);
-      if (decoded == null) throw Exception('Unable to decode selected image');
-      final normalized = Uint8List.fromList(
-        img.encodeJpg(decoded, quality: 95),
-      );
-      _pushHistory(normalized);
-      emit(
-        state.copyWith(
-          status: EditorStatus.ready,
-          originalBytes: normalized,
-          editedBytes: normalized,
-        ),
-      );
+
+      final bytes = await file.readAsBytes();
+      _pushHistory(bytes);
+
+      emit(state.copyWith(
+        status: EditorStatus.ready,
+        originalBytes: bytes,
+        editedBytes: bytes,
+        fileName: file.name,
+        fileSize: bytes.length,
+        message: 'Image loaded successfully!',
+      ));
     } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
+      emit(state.copyWith(
+        status: EditorStatus.error,
+        message: 'Failed to pick image: ${e.toString()}',
+      ));
     }
   }
 
   Future<void> pickImageFromCamera() async {
     try {
       emit(state.copyWith(status: EditorStatus.loading));
-      final XFile? file = await _picker.pickImage(source: ImageSource.camera);
+
+      final file = await _picker.pickImage(
+        source: ImageSource.camera,
+        maxWidth: 2048,
+        maxHeight: 2048,
+        imageQuality: 90,
+      );
+
       if (file == null) {
         emit(state.copyWith(status: EditorStatus.initial));
         return;
       }
-      final rawBytes = await file.readAsBytes();
-      final img.Image? decoded = img.decodeImage(rawBytes);
-      if (decoded == null) throw Exception('Unable to decode captured image');
-      final normalized = Uint8List.fromList(
-        img.encodeJpg(decoded, quality: 95),
-      );
-      _pushHistory(normalized);
-      emit(
-        state.copyWith(
-          status: EditorStatus.ready,
-          originalBytes: normalized,
-          editedBytes: normalized,
-        ),
-      );
+
+      final bytes = await file.readAsBytes();
+      _pushHistory(bytes);
+
+      emit(state.copyWith(
+        status: EditorStatus.ready,
+        originalBytes: bytes,
+        editedBytes: bytes,
+        fileName: file.name,
+        fileSize: bytes.length,
+        message: 'Photo captured successfully!',
+      ));
     } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
+      emit(state.copyWith(
+        status: EditorStatus.error,
+        message: 'Failed to capture image: ${e.toString()}',
+      ));
     }
   }
 
-  void setEdited(Uint8List bytes) {
-    _pushHistory(bytes);
-    emit(state.copyWith(editedBytes: bytes, status: EditorStatus.ready));
+  // === HISTORY MANAGEMENT ===
+  void _pushHistory(Uint8List bytes) {
+    if (_history.length >= _maxHistorySize) {
+      _history.removeAt(0);
+      _historyIndex = math.max(_historyIndex - 1, 0);
+    }
+
+    if (_historyIndex < _history.length - 1) {
+      _history.removeRange(_historyIndex + 1, _history.length);
+    }
+
+    _history.add(Uint8List.fromList(bytes));
+    _historyIndex = _history.length - 1;
+    _updateHistoryState();
   }
 
+  void _updateHistoryState() {
+    emit(state.copyWith(
+      canUndo: _historyIndex > 0,
+      canRedo: _historyIndex < _history.length - 1,
+    ));
+  }
+
+  void undo() {
+    if (_historyIndex > 0) {
+      _historyIndex--;
+      final bytes = _history[_historyIndex];
+      emit(state.copyWith(
+        editedBytes: bytes,
+        status: EditorStatus.ready,
+        canUndo: _historyIndex > 0,
+        canRedo: _historyIndex < _history.length - 1,
+        message: 'Undo successful',
+      ));
+    }
+  }
+
+  void redo() {
+    if (_historyIndex < _history.length - 1) {
+      _historyIndex++;
+      final bytes = _history[_historyIndex];
+      emit(state.copyWith(
+        editedBytes: bytes,
+        status: EditorStatus.ready,
+        canUndo: _historyIndex > 0,
+        canRedo: _historyIndex < _history.length - 1,
+        message: 'Redo successful',
+      ));
+    }
+  }
+
+  // === REAL-TIME ADJUSTMENTS ===
   void updateAdjustments({
     double? brightness,
     double? contrast,
     double? saturation,
+    double? exposure,
+    double? warmth,
+    double? highlights,
+    double? shadows,
+    double? sharpness,
+    double? vignette,
+    double? blur,
   }) {
-    emit(
-      state.copyWith(
-        brightness: brightness ?? state.brightness,
-        contrast: contrast ?? state.contrast,
-        saturation: saturation ?? state.saturation,
-      ),
+    final newState = state.copyWith(
+      brightness: brightness ?? state.brightness,
+      contrast: contrast ?? state.contrast,
+      saturation: saturation ?? state.saturation,
+      exposure: exposure ?? state.exposure,
+      warmth: warmth ?? state.warmth,
+      highlights: highlights ?? state.highlights,
+      shadows: shadows ?? state.shadows,
+      sharpness: sharpness ?? state.sharpness,
+      vignette: vignette ?? state.vignette,
+      blur: blur ?? state.blur,
     );
+
+    emit(newState);
+
+    // Apply adjustments in real-time
+    if (state.originalBytes != null) {
+      _applyAdjustmentsRealTime();
+    }
+  }
+
+  Future<void> _applyAdjustmentsRealTime() async {
+    try {
+      if (state.originalBytes == null) return;
+
+      final img.Image? originalImage = img.decodeImage(state.originalBytes!);
+      if (originalImage == null) return;
+
+      img.Image processedImage = img.copyResize(
+        originalImage,
+        width: originalImage.width,
+        height: originalImage.height,
+      );
+
+      // Apply all adjustments
+      processedImage = _applyBasicAdjustments(processedImage);
+      processedImage = _applyAdvancedAdjustments(processedImage);
+
+      // Apply blur if needed
+      if (state.blur > 0) {
+        final radius = (state.blur.clamp(0.0, 1.0) * 15).toInt();
+        processedImage = img.gaussianBlur(processedImage, radius: radius);
+      }
+
+      final resultBytes =
+          Uint8List.fromList(img.encodeJpg(processedImage, quality: 95));
+
+      emit(state.copyWith(editedBytes: resultBytes));
+    } catch (e) {
+      print('Real-time adjustment error: $e');
+    }
+  }
+
+  img.Image _applyBasicAdjustments(img.Image image) {
+    // Apply brightness with visible effect
+    if (state.brightness.abs() > 0.01) {
+      final brightnessValue = (state.brightness.clamp(-1.0, 1.0) * 100).toInt();
+      image = img.adjustColor(image, brightness: brightnessValue);
+    }
+
+    // Apply contrast with visible effect
+    if (state.contrast.abs() > 0.01) {
+      final contrastValue = (state.contrast.clamp(-1.0, 1.0) * 100).toInt();
+      image = img.adjustColor(image, contrast: contrastValue);
+    }
+
+    // Apply saturation with visible effect
+    if (state.saturation.abs() > 0.01) {
+      final saturationValue = (state.saturation.clamp(-1.0, 1.0) * 100).toInt();
+      image = img.adjustColor(image, saturation: saturationValue);
+    }
+
+    return image;
+  }
+
+  img.Image _applyAdvancedAdjustments(img.Image image) {
+    // Apply exposure
+    if (state.exposure.abs() > 0.01) {
+      final exposureValue = state.exposure.clamp(-1.0, 1.0) * 2.0;
+      for (int y = 0; y < image.height; y++) {
+        for (int x = 0; x < image.width; x++) {
+          final pixel = image.getPixel(x, y);
+          final factor = math.pow(2.0, exposureValue).toDouble();
+          final r = (pixel.r * factor).clamp(0, 255).toInt();
+          final g = (pixel.g * factor).clamp(0, 255).toInt();
+          final b = (pixel.b * factor).clamp(0, 255).toInt();
+          image.setPixelRgba(x, y, r, g, b, pixel.a);
+        }
+      }
+    }
+
+    // Apply warmth (color temperature)
+    if (state.warmth.abs() > 0.01) {
+      final warmthValue = state.warmth.clamp(-1.0, 1.0) * 50;
+      for (int y = 0; y < image.height; y++) {
+        for (int x = 0; x < image.width; x++) {
+          final pixel = image.getPixel(x, y);
+          final r = (pixel.r + warmthValue).clamp(0, 255).toInt();
+          final b = (pixel.b - warmthValue).clamp(0, 255).toInt();
+          image.setPixelRgba(x, y, r, pixel.g, b, pixel.a);
+        }
+      }
+    }
+
+    // Apply sharpness
+    if (state.sharpness > 0.01) {
+      final blurred = img.gaussianBlur(image, radius: 2);
+      for (int y = 0; y < image.height; y++) {
+        for (int x = 0; x < image.width; x++) {
+          final original = image.getPixel(x, y);
+          final blur = blurred.getPixel(x, y);
+          final amount = state.sharpness.clamp(0.0, 2.0);
+
+          final r = (original.r + amount * (original.r - blur.r))
+              .clamp(0, 255)
+              .toInt();
+          final g = (original.g + amount * (original.g - blur.g))
+              .clamp(0, 255)
+              .toInt();
+          final b = (original.b + amount * (original.b - blur.b))
+              .clamp(0, 255)
+              .toInt();
+
+          image.setPixelRgba(x, y, r, g, b, original.a);
+        }
+      }
+    }
+
+    // Apply vignette
+    if (state.vignette > 0.01) {
+      final strength = state.vignette.clamp(0.0, 1.0);
+      final centerX = image.width / 2;
+      final centerY = image.height / 2;
+      final maxDistance = math.sqrt(centerX * centerX + centerY * centerY);
+
+      for (int y = 0; y < image.height; y++) {
+        for (int x = 0; x < image.width; x++) {
+          final dx = x - centerX;
+          final dy = y - centerY;
+          final distance = math.sqrt(dx * dx + dy * dy);
+          final vignette = 1.0 - (distance / maxDistance) * strength;
+
+          final pixel = image.getPixel(x, y);
+          final r = (pixel.r * vignette).clamp(0, 255).toInt();
+          final g = (pixel.g * vignette).clamp(0, 255).toInt();
+          final b = (pixel.b * vignette).clamp(0, 255).toInt();
+
+          image.setPixelRgba(x, y, r, g, b, pixel.a);
+        }
+      }
+    }
+
+    return image;
   }
 
   Future<void> applyAdjustments() async {
     try {
-      if (state.editedBytes == null) return;
-      emit(state.copyWith(status: EditorStatus.loading));
-      final img.Image? decoded = img.decodeImage(state.editedBytes!);
-      if (decoded == null) throw Exception('Unable to decode image');
-      final adj = img.adjustColor(
-        decoded,
-        brightness: state.brightness,
-        contrast: state.contrast,
-        saturation: state.saturation,
+      if (state.originalBytes == null) return;
+
+      emit(state.copyWith(status: EditorStatus.loading, isProcessing: true));
+
+      final img.Image? originalImage = img.decodeImage(state.originalBytes!);
+      if (originalImage == null) throw Exception('Unable to decode image');
+
+      img.Image processedImage = img.copyResize(
+        originalImage,
+        width: originalImage.width,
+        height: originalImage.height,
       );
-      final out = Uint8List.fromList(img.encodeJpg(adj, quality: 95));
-      _pushHistory(out);
-      emit(state.copyWith(status: EditorStatus.ready, editedBytes: out));
+
+      // Apply all adjustments
+      processedImage = _applyBasicAdjustments(processedImage);
+      processedImage = _applyAdvancedAdjustments(processedImage);
+
+      final resultBytes =
+          Uint8List.fromList(img.encodeJpg(processedImage, quality: 95));
+      _pushHistory(resultBytes);
+
+      emit(state.copyWith(
+        status: EditorStatus.success,
+        editedBytes: resultBytes,
+        message: 'Adjustments applied successfully!',
+        isProcessing: false,
+      ));
     } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
+      emit(state.copyWith(
+        status: EditorStatus.error,
+        message: 'Failed to apply adjustments: ${e.toString()}',
+        isProcessing: false,
+      ));
     }
   }
 
-  // ----------------- Filters / Transformations (local approximations) -----------------
+  // === FILTERS ===
   Future<void> applyFilter(String filterId) async {
-    if (state.editedBytes == null) return;
     try {
-      emit(state.copyWith(status: EditorStatus.loading));
-      final img.Image? base = img.decodeImage(state.editedBytes!);
-      if (base == null) throw Exception('Unable to decode image');
-      img.Image out = img.copyResize(
-        base,
-        width: base.width,
-        height: base.height,
+      if (state.originalBytes == null) return;
+
+      emit(state.copyWith(status: EditorStatus.loading, isProcessing: true));
+
+      final img.Image? originalImage = img.decodeImage(state.originalBytes!);
+      if (originalImage == null) throw Exception('Unable to decode image');
+
+      img.Image filteredImage = img.copyResize(
+        originalImage,
+        width: originalImage.width,
+        height: originalImage.height,
       );
+
+      // Reset adjustments when applying filter
+      emit(state.copyWith(
+        brightness: 0.0,
+        contrast: 0.0,
+        saturation: 0.0,
+        exposure: 0.0,
+        warmth: 0.0,
+        sharpness: 0.0,
+        vignette: 0.0,
+        blur: 0.0,
+      ));
 
       switch (filterId) {
-        case 'gedeo_warm':
-          out = img.adjustColor(out, saturation: 0.2, brightness: 0.05);
-          out = img.colorOffset(out, red: 10);
+        case 'vivid':
+          filteredImage =
+              img.adjustColor(filteredImage, saturation: 50, contrast: 30);
           break;
-        case 'forest_green':
-          out = img.adjustColor(out, gamma: 0.95, saturation: 0.15);
-          out = img.colorOffset(out, green: 12);
+        case 'dramatic':
+          filteredImage =
+              img.adjustColor(filteredImage, contrast: 60, brightness: -10);
+          filteredImage = _applyVignetteEffect(filteredImage, 0.3);
           break;
-        case 'festival_pop':
-          out = img.adjustColor(
-            out,
-            contrast: 0.2,
-            saturation: 0.35,
-            brightness: 0.05,
-          );
+        case 'warm':
+          filteredImage = img.adjustColor(filteredImage, saturation: 20);
+          filteredImage = _applyColorTemperature(filteredImage, 30);
+          break;
+        case 'cool':
+          filteredImage = img.adjustColor(filteredImage, saturation: 20);
+          filteredImage = _applyColorTemperature(filteredImage, -30);
+          break;
+        case 'bw_high_contrast':
+          filteredImage = img.grayscale(filteredImage);
+          filteredImage = img.adjustColor(filteredImage, contrast: 40);
           break;
         case 'bw_classic':
-          out = img.grayscale(out);
-          out = img.adjustColor(out, contrast: 0.15);
+          filteredImage = img.grayscale(filteredImage);
+          filteredImage = img.adjustColor(filteredImage, brightness: 15);
           break;
-        default:
+        case 'vintage':
+          filteredImage =
+              img.adjustColor(filteredImage, saturation: -20, brightness: 15);
+          filteredImage = _applySepia(filteredImage);
+          filteredImage = _applyVignetteEffect(filteredImage, 0.4);
+          break;
+        case 'cinematic':
+          filteredImage =
+              img.adjustColor(filteredImage, contrast: 35, saturation: 25);
+          filteredImage = _applyColorGrading(filteredImage, 10, 5, -5);
+          break;
+        case 'portrait':
+          filteredImage =
+              img.adjustColor(filteredImage, saturation: 15, brightness: 8);
+          filteredImage = _applySkinSoftening(filteredImage);
+          break;
+        case 'dramatic_bw':
+          filteredImage = img.grayscale(filteredImage);
+          filteredImage =
+              img.adjustColor(filteredImage, contrast: 50, brightness: -5);
           break;
       }
-      final result = Uint8List.fromList(img.encodeJpg(out, quality: 95));
-      _pushHistory(result);
-      emit(
-        state.copyWith(
-          status: EditorStatus.ready,
-          editedBytes: result,
-          appliedFilterId: filterId,
-        ),
+
+      final resultBytes =
+          Uint8List.fromList(img.encodeJpg(filteredImage, quality: 95));
+      _pushHistory(resultBytes);
+
+      emit(state.copyWith(
+        status: EditorStatus.success,
+        editedBytes: resultBytes,
+        appliedFilterId: filterId,
+        message: 'Filter applied successfully!',
+        isProcessing: false,
+      ));
+    } catch (e) {
+      emit(state.copyWith(
+        status: EditorStatus.error,
+        message: 'Failed to apply filter: ${e.toString()}',
+        isProcessing: false,
+      ));
+    }
+  }
+
+  img.Image _applyVignetteEffect(img.Image image, double strength) {
+    final centerX = image.width / 2;
+    final centerY = image.height / 2;
+    final maxDistance = math.sqrt(centerX * centerX + centerY * centerY);
+
+    for (int y = 0; y < image.height; y++) {
+      for (int x = 0; x < image.width; x++) {
+        final dx = x - centerX;
+        final dy = y - centerY;
+        final distance = math.sqrt(dx * dx + dy * dy);
+        final vignette = 1.0 - (distance / maxDistance) * strength;
+
+        final pixel = image.getPixel(x, y);
+        final r = (pixel.r * vignette).clamp(0, 255).toInt();
+        final g = (pixel.g * vignette).clamp(0, 255).toInt();
+        final b = (pixel.b * vignette).clamp(0, 255).toInt();
+
+        image.setPixelRgba(x, y, r, g, b, pixel.a);
+      }
+    }
+    return image;
+  }
+
+  img.Image _applyColorTemperature(img.Image image, double temperature) {
+    for (int y = 0; y < image.height; y++) {
+      for (int x = 0; x < image.width; x++) {
+        final pixel = image.getPixel(x, y);
+        final r = (pixel.r + temperature).clamp(0, 255).toInt();
+        final b = (pixel.b - temperature).clamp(0, 255).toInt();
+        image.setPixelRgba(x, y, r, pixel.g, b, pixel.a);
+      }
+    }
+    return image;
+  }
+
+  img.Image _applySepia(img.Image image) {
+    for (int y = 0; y < image.height; y++) {
+      for (int x = 0; x < image.width; x++) {
+        final pixel = image.getPixel(x, y);
+        final r = (pixel.r * 0.393 + pixel.g * 0.769 + pixel.b * 0.189)
+            .clamp(0, 255)
+            .toInt();
+        final g = (pixel.r * 0.349 + pixel.g * 0.686 + pixel.b * 0.168)
+            .clamp(0, 255)
+            .toInt();
+        final b = (pixel.r * 0.272 + pixel.g * 0.534 + pixel.b * 0.131)
+            .clamp(0, 255)
+            .toInt();
+        image.setPixelRgba(x, y, r, g, b, pixel.a);
+      }
+    }
+    return image;
+  }
+
+  img.Image _applyColorGrading(img.Image image, int red, int green, int blue) {
+    return img.colorOffset(image, red: red, green: green, blue: blue);
+  }
+
+  img.Image _applySkinSoftening(img.Image image) {
+    final blurred = img.gaussianBlur(image, radius: 2);
+    for (int y = 0; y < image.height; y++) {
+      for (int x = 0; x < image.width; x++) {
+        final original = image.getPixel(x, y);
+        final blur = blurred.getPixel(x, y);
+
+        // Detect skin tones (warm colors with red dominance)
+        if (original.r > original.g &&
+            original.r > original.b &&
+            original.r > 100) {
+          final r = (original.r * 0.7 + blur.r * 0.3).toInt();
+          final g = (original.g * 0.7 + blur.g * 0.3).toInt();
+          final b = (original.b * 0.7 + blur.b * 0.3).toInt();
+          image.setPixelRgba(x, y, r, g, b, original.a);
+        }
+      }
+    }
+    return image;
+  }
+
+  // === AI ENHANCEMENTS ===
+  Future<void> autoEnhance() async {
+    try {
+      if (state.originalBytes == null) return;
+
+      emit(state.copyWith(status: EditorStatus.loading, isProcessing: true));
+
+      final img.Image? originalImage = img.decodeImage(state.originalBytes!);
+      if (originalImage == null) throw Exception('Unable to decode image');
+
+      // Analyze image for automatic enhancements
+      final analysis = _analyzeImage(originalImage);
+
+      img.Image enhancedImage = img.copyResize(
+        originalImage,
+        width: originalImage.width,
+        height: originalImage.height,
       );
+
+      // Apply smart enhancements based on analysis
+      if (analysis.isDark) {
+        enhancedImage = img.adjustColor(enhancedImage, brightness: 25);
+      }
+
+      if (analysis.isLowContrast) {
+        enhancedImage = img.adjustColor(enhancedImage, contrast: 30);
+      }
+
+      if (analysis.isLowSaturation) {
+        enhancedImage = img.adjustColor(enhancedImage, saturation: 25);
+      }
+
+      // Always apply slight sharpening
+      enhancedImage = _applySharpening(enhancedImage);
+
+      final resultBytes =
+          Uint8List.fromList(img.encodeJpg(enhancedImage, quality: 95));
+      _pushHistory(resultBytes);
+
+      emit(state.copyWith(
+        status: EditorStatus.success,
+        editedBytes: resultBytes,
+        message: 'Auto enhancement applied!',
+        isProcessing: false,
+      ));
     } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
+      emit(state.copyWith(
+        status: EditorStatus.error,
+        message: 'Auto enhancement failed: ${e.toString()}',
+        isProcessing: false,
+      ));
     }
   }
 
-  Future<void> tiltShift({
-    double center = 0.5,
-    double span = 0.3,
-    bool horizontal = true,
-  }) async {
-    if (state.editedBytes == null) return;
+  Future<void> magicEdit() async {
     try {
-      emit(state.copyWith(status: EditorStatus.loading));
-      final img.Image? base = img.decodeImage(state.editedBytes!);
-      if (base == null) throw Exception('Unable to decode image');
-      final img.Image blurred = img.gaussianBlur(
-        img.copyResize(base, width: base.width, height: base.height),
-        radius: 8,
+      if (state.originalBytes == null) return;
+
+      emit(state.copyWith(status: EditorStatus.loading, isProcessing: true));
+
+      final img.Image? originalImage = img.decodeImage(state.originalBytes!);
+      if (originalImage == null) throw Exception('Unable to decode image');
+
+      img.Image magicImage = img.copyResize(
+        originalImage,
+        width: originalImage.width,
+        height: originalImage.height,
       );
 
-      final w = base.width;
-      final h = base.height;
-      final img.Image out = img.copyResize(base, width: w, height: h);
-      final double half = (span.clamp(0.05, 0.9)) / 2.0;
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          double t = horizontal ? (y / (h - 1)) : (x / (w - 1));
-          double dist = (t - center).abs();
-          double m = ((dist - half) / (0.5 - half)).clamp(0.0, 1.0);
-          final img.Pixel p0 = base.getPixel(x, y);
-          final img.Pixel p1 = blurred.getPixel(x, y);
-          int r = (p0.r * (1 - m) + p1.r * m).round();
-          int g = (p0.g * (1 - m) + p1.g * m).round();
-          int b = (p0.b * (1 - m) + p1.b * m).round();
-          out.setPixelRgba(x, y, r, g, b, 255);
-        }
-      }
-      final result = Uint8List.fromList(img.encodeJpg(out, quality: 95));
-      _pushHistory(result);
-      emit(state.copyWith(status: EditorStatus.ready, editedBytes: result));
+      // Apply multiple professional enhancements
+      magicImage = img.adjustColor(magicImage,
+          brightness: 12, contrast: 25, saturation: 20);
+      magicImage = _applySharpening(magicImage);
+      magicImage = _applyVignetteEffect(magicImage, 0.2);
+      magicImage = _applyColorGrading(magicImage, 8, 5, -3);
+
+      final resultBytes =
+          Uint8List.fromList(img.encodeJpg(magicImage, quality: 95));
+      _pushHistory(resultBytes);
+
+      emit(state.copyWith(
+        status: EditorStatus.success,
+        editedBytes: resultBytes,
+        message: 'Magic edit applied! Your photo looks amazing!',
+        isProcessing: false,
+      ));
     } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
+      emit(state.copyWith(
+        status: EditorStatus.error,
+        message: 'Magic edit failed: ${e.toString()}',
+        isProcessing: false,
+      ));
     }
   }
 
-  Future<void> colorSplash({
-    required double hue,
-    double tolerance = 0.08,
-  }) async {
-    if (state.editedBytes == null) return;
-    try {
-      emit(state.copyWith(status: EditorStatus.loading));
-      final img.Image? base = img.decodeImage(state.editedBytes!);
-      if (base == null) throw Exception('Unable to decode image');
-      final w = base.width, h = base.height;
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          final img.Pixel p = base.getPixel(x, y);
-          double r = p.r / 255.0;
-          double g = p.g / 255.0;
-          double b = p.b / 255.0;
-          final double maxv = [r, g, b].reduce((a, b) => a > b ? a : b);
-          final double minv = [r, g, b].reduce((a, b) => a < b ? a : b);
-          final double d = maxv - minv;
-          double hDeg = 0.0;
-          if (d == 0) {
-            hDeg = 0;
-          } else if (maxv == r) {
-            hDeg = 60 * (((g - b) / d) % 6);
-          } else if (maxv == g) {
-            hDeg = 60 * (((b - r) / d) + 2);
-          } else {
-            hDeg = 60 * (((r - g) / d) + 4);
-          }
-          if (hDeg < 0) hDeg += 360;
-          double hNorm = hDeg / 360.0;
-          double diff = (hNorm - hue).abs();
-          diff = diff > 0.5 ? 1.0 - diff : diff;
-          if (diff > tolerance) {
-            int gray = (0.299 * p.r + 0.587 * p.g + 0.114 * p.b).round();
-            base.setPixelRgba(x, y, gray, gray, gray, p.a);
-          }
-        }
+  img.Image _applySharpening(img.Image image) {
+    final blurred = img.gaussianBlur(image, radius: 1);
+    for (int y = 0; y < image.height; y++) {
+      for (int x = 0; x < image.width; x++) {
+        final original = image.getPixel(x, y);
+        final blur = blurred.getPixel(x, y);
+
+        final r =
+            (original.r + 0.8 * (original.r - blur.r)).clamp(0, 255).toInt();
+        final g =
+            (original.g + 0.8 * (original.g - blur.g)).clamp(0, 255).toInt();
+        final b =
+            (original.b + 0.8 * (original.b - blur.b)).clamp(0, 255).toInt();
+
+        image.setPixelRgba(x, y, r, g, b, original.a);
       }
-      final result = Uint8List.fromList(img.encodeJpg(base, quality: 95));
-      _pushHistory(result);
-      emit(state.copyWith(status: EditorStatus.ready, editedBytes: result));
-    } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
     }
+    return image;
   }
 
-  Future<void> doubleExposure(
-    Uint8List otherBytes, {
-    double opacity = 0.5,
-  }) async {
-    if (state.editedBytes == null) return;
+  // === SPECIAL EFFECTS ===
+  Future<void> applyBlurEffect(
+      {double intensity = 0.5, bool isTiltShift = false}) async {
     try {
-      emit(state.copyWith(status: EditorStatus.loading));
-      final img.Image? base = img.decodeImage(state.editedBytes!);
-      final img.Image? other = img.decodeImage(otherBytes);
-      if (base == null || other == null)
-        throw Exception('Unable to decode image');
-      final img.Image otherResized = img.copyResize(
-        other,
-        width: base.width,
-        height: base.height,
+      if (state.originalBytes == null) return;
+
+      emit(state.copyWith(status: EditorStatus.loading, isProcessing: true));
+
+      final img.Image? originalImage = img.decodeImage(state.originalBytes!);
+      if (originalImage == null) throw Exception('Unable to decode image');
+
+      img.Image blurredImage = img.copyResize(
+        originalImage,
+        width: originalImage.width,
+        height: originalImage.height,
       );
-      final w = base.width, h = base.height;
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          final img.Pixel p0 = base.getPixel(x, y);
-          final img.Pixel p1 = otherResized.getPixel(x, y);
-          int r = ((p0.r * (1 - opacity) + p1.r * opacity)).round();
-          int g = ((p0.g * (1 - opacity) + p1.g * opacity)).round();
-          int b = ((p0.b * (1 - opacity) + p1.b * opacity)).round();
-          base.setPixelRgba(x, y, r, g, b, p0.a);
-        }
-      }
-      final result = Uint8List.fromList(img.encodeJpg(base, quality: 95));
-      _pushHistory(result);
-      emit(state.copyWith(status: EditorStatus.ready, editedBytes: result));
-    } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
-    }
-  }
 
-  Future<void> lensVignette(double strength) async {
-    if (state.editedBytes == null) return;
-    try {
-      emit(state.copyWith(status: EditorStatus.loading));
-      final img.Image? base = img.decodeImage(state.editedBytes!);
-      if (base == null) throw Exception('Unable to decode image');
-
-      final double w = base.width.toDouble();
-      final double h = base.height.toDouble();
-      final double cx = w / 2.0, cy = h / 2.0;
-      final double maxR = math.sqrt(w * w + h * h) / 2.0;
-
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          final dx = x - cx;
-          final dy = y - cy;
-          final d = math.sqrt(dx * dx + dy * dy);
-          final v = (d / maxR).clamp(0.0, 1.0);
-          final m = (1.0 - v * strength.clamp(0.0, 1.0)).clamp(0.0, 1.0);
-          final img.Pixel p = base.getPixel(x, y);
-          final r = (p.r * m).round();
-          final g = (p.g * m).round();
-          final b = (p.b * m).round();
-          final a = p.a;
-          base.setPixelRgba(x, y, r, g, b, a);
-        }
-      }
-
-      final out = Uint8List.fromList(img.encodeJpg(base, quality: 95));
-      _pushHistory(out);
-      emit(state.copyWith(status: EditorStatus.ready, editedBytes: out));
-    } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
-    }
-  }
-
-  Future<void> lensDistortion(double amount) async {
-    if (state.editedBytes == null) return;
-    try {
-      emit(state.copyWith(status: EditorStatus.loading));
-      final img.Image? src = img.decodeImage(state.editedBytes!);
-      if (src == null) throw Exception('Unable to decode image');
-
-      final int w = src.width;
-      final int h = src.height;
-      final img.Image dst = img.Image(width: w, height: h);
-      final double cx = (w - 1) / 2.0;
-      final double cy = (h - 1) / 2.0;
-      final double k = amount;
-
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          final nx = (x - cx) / cx;
-          final ny = (y - cy) / cy;
-          final r2 = nx * nx + ny * ny;
-          final factor = 1 + k * r2;
-          final sx = cx + nx * factor * cx;
-          final sy = cy + ny * factor * cy;
-          final ix = sx.round();
-          final iy = sy.round();
-          if (ix >= 0 && ix < w && iy >= 0 && iy < h) {
-            final img.Pixel sp = src.getPixel(ix, iy);
-            dst.setPixelRgba(x, y, sp.r, sp.g, sp.b, sp.a);
-          } else {
-            dst.setPixelRgba(x, y, 0, 0, 0, 255);
-          }
-        }
-      }
-
-      final out = Uint8List.fromList(img.encodeJpg(dst, quality: 95));
-      _pushHistory(out);
-      emit(state.copyWith(status: EditorStatus.ready, editedBytes: out));
-    } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
-    }
-  }
-
-  Future<void> fixChromaticAberration(double shiftPx) async {
-    if (state.editedBytes == null) return;
-    try {
-      emit(state.copyWith(status: EditorStatus.loading));
-      final img.Image? src = img.decodeImage(state.editedBytes!);
-      if (src == null) throw Exception('Unable to decode image');
-      final int w = src.width, h = src.height;
-      final img.Image out = img.Image(width: w, height: h);
-
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          final int xr = (x + shiftPx).round().clamp(0, w - 1);
-          final int xb = (x - shiftPx).round().clamp(0, w - 1);
-          final img.Pixel pr = src.getPixel(xr, y);
-          final img.Pixel pg = src.getPixel(x, y);
-          final img.Pixel pb = src.getPixel(xb, y);
-          out.setPixelRgba(x, y, pr.r, pg.g, pb.b, pg.a);
-        }
-      }
-
-      final result = Uint8List.fromList(img.encodeJpg(out, quality: 95));
-      _pushHistory(result);
-      emit(state.copyWith(status: EditorStatus.ready, editedBytes: result));
-    } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
-    }
-  }
-
-  // ----------------- Background / Inpaint (local + external hooks) -----------------
-  Future<void> removeBackgroundAuto({
-    Uint8List? backgroundBytes,
-    double threshold = 60.0,
-  }) async {
-    if (state.editedBytes == null) return;
-    try {
-      emit(state.copyWith(status: EditorStatus.loading));
-      final img.Image? src = img.decodeImage(state.editedBytes!);
-      if (src == null) throw Exception('Unable to decode image');
-      final int w = src.width, h = src.height;
-
-      img.Pixel c0 = src.getPixel(0, 0);
-      img.Pixel c1 = src.getPixel(w - 1, 0);
-      img.Pixel c2 = src.getPixel(0, h - 1);
-      img.Pixel c3 = src.getPixel(w - 1, h - 1);
-      final int sr = ((c0.r + c1.r + c2.r + c3.r) ~/ 4);
-      final int sg = ((c0.g + c1.g + c2.g + c3.g) ~/ 4);
-      final int sb = ((c0.b + c1.b + c2.b + c3.b) ~/ 4);
-
-      final img.Image out = img.Image(
-        width: w,
-        height: h,
-        channels: img.Channels.rgba,
-      );
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          final img.Pixel p = src.getPixel(x, y);
-          final double dist = math.sqrt(
-            math.pow(p.r - sr, 2) +
-                math.pow(p.g - sg, 2) +
-                math.pow(p.b - sb, 2),
-          );
-          if (dist < threshold) {
-            out.setPixelRgba(x, y, p.r, p.g, p.b, 0);
-          } else {
-            out.setPixelRgba(x, y, p.r, p.g, p.b, p.a);
-          }
-        }
-      }
-
-      img.Image finalImg = out;
-      if (backgroundBytes != null) {
-        final img.Image? bg = img.decodeImage(backgroundBytes);
-        if (bg == null) throw Exception('Invalid background image');
-        final img.Image bgRes = img.copyResize(bg, width: w, height: h);
-        finalImg = _compositeForegroundOverBackground(out, bgRes);
-      }
-
-      final result = finalImg.hasAlpha
-          ? Uint8List.fromList(img.encodePng(finalImg))
-          : Uint8List.fromList(img.encodeJpg(finalImg, quality: 95));
-      _pushHistory(result);
-      emit(state.copyWith(status: EditorStatus.ready, editedBytes: result));
-    } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
-    }
-  }
-
-  Future<void> removeBackgroundWithApi(
-    Future<Uint8List> Function(Uint8List) apiRemove, {
-    Uint8List? backgroundBytes,
-  }) async {
-    if (state.editedBytes == null) return;
-    try {
-      emit(state.copyWith(status: EditorStatus.loading));
-      final Uint8List cutoutPng = await apiRemove(state.editedBytes!);
-      final img.Image? fg = img.decodePng(cutoutPng);
-      if (fg == null) throw Exception('API returned invalid PNG');
-
-      img.Image out;
-      if (backgroundBytes != null) {
-        final img.Image? bg = img.decodeImage(backgroundBytes);
-        if (bg == null) throw Exception('Background invalid');
-        final img.Image bgRes = img.copyResize(
-          bg,
-          width: fg.width,
-          height: fg.height,
-        );
-        out = _compositeForegroundOverBackground(fg, bgRes);
+      if (isTiltShift) {
+        blurredImage = _applyTiltShift(blurredImage, intensity);
       } else {
-        out = fg;
+        final radius = (intensity.clamp(0.0, 1.0) * 20).toInt();
+        blurredImage = img.gaussianBlur(blurredImage, radius: radius);
       }
 
-      final result = out.hasAlpha
-          ? Uint8List.fromList(img.encodePng(out))
-          : Uint8List.fromList(img.encodeJpg(out, quality: 95));
-      _pushHistory(result);
-      emit(state.copyWith(status: EditorStatus.ready, editedBytes: result));
+      final resultBytes =
+          Uint8List.fromList(img.encodeJpg(blurredImage, quality: 95));
+      _pushHistory(resultBytes);
+
+      emit(state.copyWith(
+        status: EditorStatus.success,
+        editedBytes: resultBytes,
+        message: 'Blur effect applied!',
+        isProcessing: false,
+      ));
     } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
+      emit(state.copyWith(
+        status: EditorStatus.error,
+        message: 'Blur effect failed: ${e.toString()}',
+        isProcessing: false,
+      ));
     }
   }
 
-  img.Image _compositeForegroundOverBackground(img.Image fg, img.Image bg) {
-    final img.Image out = img.copyResize(
-      bg,
-      width: fg.width,
-      height: fg.height,
+  img.Image _applyTiltShift(img.Image image, double intensity) {
+    final blurred = img.gaussianBlur(image, radius: 10);
+    final centerY = image.height / 2;
+    final focusHeight = image.height * 0.2 * (1.0 - intensity.clamp(0.0, 1.0));
+
+    for (int y = 0; y < image.height; y++) {
+      final distanceFromCenter = (y - centerY).abs();
+      double blurAmount = 0.0;
+
+      if (distanceFromCenter > focusHeight) {
+        blurAmount = ((distanceFromCenter - focusHeight) /
+                (image.height / 2 - focusHeight))
+            .clamp(0.0, 1.0);
+      }
+
+      for (int x = 0; x < image.width; x++) {
+        final original = image.getPixel(x, y);
+        final blur = blurred.getPixel(x, y);
+
+        final r = (original.r * (1 - blurAmount) + blur.r * blurAmount).toInt();
+        final g = (original.g * (1 - blurAmount) + blur.g * blurAmount).toInt();
+        final b = (original.b * (1 - blurAmount) + blur.b * blurAmount).toInt();
+
+        image.setPixelRgba(x, y, r, g, b, original.a);
+      }
+    }
+    return image;
+  }
+
+  // === IMAGE ANALYSIS ===
+  _ImageAnalysis _analyzeImage(img.Image image) {
+    double totalBrightness = 0;
+    int minBrightness = 255;
+    int maxBrightness = 0;
+    double totalSaturation = 0;
+
+    int sampleCount = 0;
+
+    for (int y = 0; y < image.height; y += 10) {
+      for (int x = 0; x < image.width; x += 10) {
+        final pixel = image.getPixel(x, y);
+        final brightness =
+            (0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b);
+
+        totalBrightness += brightness;
+        minBrightness = math.min(minBrightness, brightness.toInt());
+        maxBrightness = math.max(maxBrightness, brightness.toInt());
+
+        // Simple saturation calculation
+        final maxColor = math.max(pixel.r, math.max(pixel.g, pixel.b));
+        final minColor = math.min(pixel.r, math.min(pixel.g, pixel.b));
+        final saturation = maxColor == 0 ? 0 : (maxColor - minColor) / maxColor;
+        totalSaturation += saturation;
+
+        sampleCount++;
+      }
+    }
+
+    final avgBrightness = totalBrightness / sampleCount / 255;
+    final avgSaturation = totalSaturation / sampleCount;
+    final contrastRange = (maxBrightness - minBrightness) / 255.0;
+
+    return _ImageAnalysis(
+      isDark: avgBrightness < 0.4,
+      isLowContrast: contrastRange < 0.3,
+      isLowSaturation: avgSaturation < 0.2,
+      averageBrightness: avgBrightness,
     );
-    for (int y = 0; y < fg.height; y++) {
-      for (int x = 0; x < fg.width; x++) {
-        final img.Pixel p = fg.getPixel(x, y);
-        final int alpha = p.a;
-        if (alpha == 255) {
-          out.setPixelRgba(x, y, p.r, p.g, p.b, 255);
-        } else if (alpha > 0) {
-          final img.Pixel bp = out.getPixel(x, y);
-          final double a = alpha / 255.0;
-          final int r = (p.r * a + bp.r * (1 - a)).round();
-          final int g = (p.g * a + bp.g * (1 - a)).round();
-          final int b = (p.b * a + bp.b * (1 - a)).round();
-          out.setPixelRgba(x, y, r, g, b, 255);
-        }
-      }
-    }
-    return out;
   }
 
-  Future<void> removeObjectLocal(
-    Uint8List maskBytes, {
-    int maxRadius = 8,
-  }) async {
-    if (state.editedBytes == null) return;
-    try {
-      emit(state.copyWith(status: EditorStatus.loading));
-      final img.Image? src = img.decodeImage(state.editedBytes!);
-      final img.Image? maskImg = img.decodeImage(maskBytes);
-      if (src == null || maskImg == null)
-        throw Exception('Invalid image or mask');
-      final int w = src.width, h = src.height;
-      final img.Image mask = img.copyResize(maskImg, width: w, height: h);
-      final List<List<bool>> masked = List.generate(
-        h,
-        (_) => List.filled(w, false),
-      );
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          final img.Pixel m = mask.getPixel(x, y);
-          final int mval = ((m.r + m.g + m.b) ~/ 3);
-          masked[y][x] = mval > 128;
-        }
-      }
+  // === UTILITY METHODS ===
+  void setOverlay(String? overlay) {
+    emit(state.copyWith(overlay: overlay));
+  }
 
-      final img.Image out = img.copyResize(src, width: w, height: h);
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          if (!masked[y][x]) continue;
-          bool filled = false;
-          for (int r = 1; r <= maxRadius && !filled; r++) {
-            int count = 0;
-            num sr = 0, sg = 0, sb = 0;
-            final int xmin = math.max(0, x - r);
-            final int xmax = math.min(w - 1, x + r);
-            final int ymin = math.max(0, y - r);
-            final int ymax = math.min(h - 1, y + r);
-            for (int yy = ymin; yy <= ymax; yy++) {
-              for (int xx = xmin; xx <= xmax; xx++) {
-                if (yy != ymin && yy != ymax && xx != xmin && xx != xmax)
-                  continue;
-                if (!masked[yy][xx]) {
-                  final img.Pixel p = src.getPixel(xx, yy);
-                  sr += p.r;
-                  sg += p.g;
-                  sb += p.b;
-                  count++;
-                }
-              }
-            }
-            if (count > 0) {
-              final int rcol = (sr / count).round();
-              final int gcol = (sg / count).round();
-              final int bcol = (sb / count).round();
-              out.setPixelRgba(x, y, rcol, gcol, bcol, 255);
-              filled = true;
-            }
-          }
-          if (!filled) {
-            final img.Pixel p = src.getPixel(x, y);
-            out.setPixelRgba(x, y, p.r, p.g, p.b, p.a);
-          }
-        }
-      }
-
-      final result = Uint8List.fromList(img.encodeJpg(out, quality: 95));
-      _pushHistory(result);
-      emit(state.copyWith(status: EditorStatus.ready, editedBytes: result));
-    } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
+  void reset() {
+    if (state.originalBytes != null) {
+      _pushHistory(state.originalBytes!);
+      emit(state.copyWith(
+        editedBytes: state.originalBytes,
+        brightness: 0.0,
+        contrast: 0.0,
+        saturation: 0.0,
+        exposure: 0.0,
+        warmth: 0.0,
+        highlights: 0.0,
+        shadows: 0.0,
+        sharpness: 0.0,
+        vignette: 0.0,
+        blur: 0.0,
+        appliedFilterId: null,
+        overlay: null,
+        status: EditorStatus.ready,
+        message: 'Reset to original',
+      ));
     }
   }
 
-  Future<void> removeObjectWithApi(
-    Future<Uint8List> Function(Uint8List, Uint8List) apiInpaint,
-    Uint8List brushMaskBytes,
-  ) async {
-    if (state.editedBytes == null) return;
+  Future<void> saveImage() async {
     try {
+      if (state.editedBytes == null) return;
+
       emit(state.copyWith(status: EditorStatus.loading));
-      final Uint8List patched = await apiInpaint(
-        state.editedBytes!,
-        brushMaskBytes,
-      );
-      _pushHistory(patched);
-      emit(state.copyWith(status: EditorStatus.ready, editedBytes: patched));
+
+      // For web demo, we'll just show success message
+      emit(state.copyWith(
+        status: EditorStatus.success,
+        message: 'Image enhanced successfully! (Use screenshot to save)',
+      ));
     } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
+      emit(state.copyWith(
+        status: EditorStatus.error,
+        message: 'Failed to process image: ${e.toString()}',
+      ));
     }
   }
 
-  // ----------------- AI-like local features ---------------------------------
-  Future<void> photoToSketch({
-    bool cartoon = false,
-    int posterizeLevels = 6,
-  }) async {
-    if (state.editedBytes == null) return;
-    try {
-      emit(state.copyWith(status: EditorStatus.loading));
-      final img.Image? src = img.decodeImage(state.editedBytes!);
-      if (src == null) throw Exception('Unable to decode image');
-      final int w = src.width, h = src.height;
-      final img.Image gray = img.grayscale(src);
-      final img.Image edges = img.copyResize(gray);
-      final kernel = [
-        [-1, -1, -1],
-        [-1, 8, -1],
-        [-1, -1, -1],
-      ];
-      for (int y = 1; y < h - 1; y++) {
-        for (int x = 1; x < w - 1; x++) {
-          int v = 0;
-          for (int ky = -1; ky <= 1; ky++) {
-            for (int kx = -1; kx <= 1; kx++) {
-              final p = gray.getPixel(x + kx, y + ky);
-              v += ((p.r) * kernel[ky + 1][kx + 1]);
-            }
-          }
-          final c = (v.abs()).clamp(0, 255);
-          edges.setPixelRgba(x, y, c, c, c, 255);
-        }
-      }
-
-      if (cartoon) {
-        final img.Image poster = img.copyResize(src);
-        for (int y = 0; y < h; y++) {
-          for (int x = 0; x < w; x++) {
-            final p = poster.getPixel(x, y);
-            int r =
-                ((p.r / 255.0) * posterizeLevels).round() *
-                (255 ~/ posterizeLevels);
-            int g =
-                ((p.g / 255.0) * posterizeLevels).round() *
-                (255 ~/ posterizeLevels);
-            int b =
-                ((p.b / 255.0) * posterizeLevels).round() *
-                (255 ~/ posterizeLevels);
-            poster.setPixelRgba(
-              x,
-              y,
-              r.clamp(0, 255),
-              g.clamp(0, 255),
-              b.clamp(0, 255),
-              p.a,
-            );
-          }
-        }
-        for (int y = 0; y < h; y++) {
-          for (int x = 0; x < w; x++) {
-            final e = edges.getPixel(x, y);
-            if (e.r > 40) {
-              poster.setPixelRgba(x, y, 0, 0, 0, 255);
-            }
-          }
-        }
-        final result = Uint8List.fromList(img.encodeJpg(poster, quality: 95));
-        _pushHistory(result);
-        emit(state.copyWith(status: EditorStatus.ready, editedBytes: result));
-        return;
-      }
-
-      final img.Image sketch = img.copyResize(edges);
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          final p = sketch.getPixel(x, y);
-          final int v = 255 - p.r;
-          sketch.setPixelRgba(x, y, v, v, v, 255);
-        }
-      }
-      final result = Uint8List.fromList(img.encodeJpg(sketch, quality: 95));
-      _pushHistory(result);
-      emit(state.copyWith(status: EditorStatus.ready, editedBytes: result));
-    } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
-    }
-  }
-
-  Future<void> generateAvatar({
-    Uint8List? backgroundBytes,
-    int size = 512,
-  }) async {
-    if (state.editedBytes == null) return;
-    try {
-      emit(state.copyWith(status: EditorStatus.loading));
-      final img.Image? src = img.decodeImage(state.editedBytes!);
-      if (src == null) throw Exception('Unable to decode image');
-      final int w = src.width, h = src.height;
-      final int side = math.min(w, h);
-      final int x0 = ((w - side) / 2).round();
-      final int y0 = ((h - side) / 2).round();
-      img.Image crop = img.copyCrop(
-        src,
-        x: x0,
-        y: y0,
-        width: side,
-        height: side,
-      );
-      img.Image out = img.copyResize(crop, width: size, height: size);
-      out = img.adjustColor(out, saturation: 0.2, contrast: 0.12);
-      final img.Image circ = img.Image(
-        width: size,
-        height: size,
-        channels: img.Channels.rgba,
-      );
-      final double cx = size / 2.0, cy = size / 2.0;
-      final double r = size / 2.0;
-      for (int y = 0; y < size; y++) {
-        for (int x = 0; x < size; x++) {
-          final dx = x - cx;
-          final dy = y - cy;
-          final d = math.sqrt(dx * dx + dy * dy);
-          if (d <= r) {
-            final p = out.getPixel(x, y);
-            circ.setPixelRgba(x, y, p.r, p.g, p.b, 255);
-          } else {
-            circ.setPixelRgba(x, y, 0, 0, 0, 0);
-          }
-        }
-      }
-
-      img.Image finalImg = circ;
-      if (backgroundBytes != null) {
-        final img.Image? bg = img.decodeImage(backgroundBytes);
-        if (bg != null) {
-          final img.Image bgRes = img.copyResize(bg, width: size, height: size);
-          finalImg = _compositeForegroundOverBackground(circ, bgRes);
-        }
-      }
-
-      final bytes = finalImg.hasAlpha
-          ? Uint8List.fromList(img.encodePng(finalImg))
-          : Uint8List.fromList(img.encodeJpg(finalImg, quality: 95));
-      _pushHistory(bytes);
-      emit(state.copyWith(status: EditorStatus.ready, editedBytes: bytes));
-    } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
-    }
+  void clearAll() {
+    _history.clear();
+    _historyIndex = -1;
+    emit(const EditorState());
   }
 
   Future<void> textToEdit(String prompt) async {
-    if (state.editedBytes == null) return;
     try {
-      emit(state.copyWith(status: EditorStatus.loading));
-      final p = prompt.toLowerCase();
-      if (p.contains('cinematic')) {
-        await applyFilter('festival_pop');
-        await lensVignette(0.25);
-      } else if (p.contains('bright') || p.contains('expose')) {
-        updateAdjustments(brightness: 0.08, contrast: 0.06, saturation: 0.06);
-        await applyAdjustments();
-      } else if (p.contains('portrait') || p.contains('skin')) {
-        await autoEnhance(sharpenAmount: 0.3);
-      } else if (p.contains('bokeh') || p.contains('blur')) {
-        await tiltShift(center: 0.5, span: 0.3, horizontal: false);
-      } else {
-        await autoEnhance();
-      }
-    } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
-    }
-  }
+      if (state.originalBytes == null) return;
 
-  Future<void> autoEnhance({double sharpenAmount = 0.6}) async {
-    if (state.editedBytes == null) return;
-    try {
-      emit(state.copyWith(status: EditorStatus.loading));
-      final img.Image? src = img.decodeImage(state.editedBytes!);
-      if (src == null) throw Exception('Unable to decode image');
+      emit(state.copyWith(status: EditorStatus.loading, isProcessing: true));
 
-      double avg = 0;
-      final int w = src.width, h = src.height, n = w * h;
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          final img.Pixel p = src.getPixel(x, y);
-          avg += (0.299 * p.r + 0.587 * p.g + 0.114 * p.b);
-        }
-      }
-      avg /= n * 255.0;
+      // Simulate AI processing based on text prompt
+      await Future.delayed(const Duration(seconds: 2));
 
-      final double exposureDelta = (0.5 - avg) * 0.3;
-      final double saturation = 0.12;
-      final double contrast = 0.09;
+      final img.Image? originalImage = img.decodeImage(state.originalBytes!);
+      if (originalImage == null) throw Exception('Unable to decode image');
 
-      img.Image out = img.adjustColor(
-        src,
-        brightness: exposureDelta,
-        saturation: saturation,
-        contrast: contrast,
+      img.Image processedImage = img.copyResize(
+        originalImage,
+        width: originalImage.width,
+        height: originalImage.height,
       );
-      final img.Image blurred = img.gaussianBlur(out, radius: 2);
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          final img.Pixel p0 = out.getPixel(x, y);
-          final img.Pixel p1 = blurred.getPixel(x, y);
-          int r = (p0.r + sharpenAmount * (p0.r - p1.r)).round().clamp(0, 255);
-          int g = (p0.g + sharpenAmount * (p0.g - p1.g)).round().clamp(0, 255);
-          int b = (p0.b + sharpenAmount * (p0.b - p1.b)).round().clamp(0, 255);
-          out.setPixelRgba(x, y, r, g, b, p0.a);
-        }
+
+      // Apply effects based on common prompts
+      final lowerPrompt = prompt.toLowerCase();
+
+      if (lowerPrompt.contains('bright') || lowerPrompt.contains('light')) {
+        processedImage = img.adjustColor(processedImage, brightness: 30);
       }
 
-      final result = Uint8List.fromList(img.encodeJpg(out, quality: 95));
-      _pushHistory(result);
-      emit(state.copyWith(status: EditorStatus.ready, editedBytes: result));
+      if (lowerPrompt.contains('contrast') ||
+          lowerPrompt.contains('dramatic')) {
+        processedImage = img.adjustColor(processedImage, contrast: 40);
+      }
+
+      if (lowerPrompt.contains('vibrant') || lowerPrompt.contains('color')) {
+        processedImage = img.adjustColor(processedImage, saturation: 35);
+      }
+
+      if (lowerPrompt.contains('warm') || lowerPrompt.contains('sunset')) {
+        processedImage = _applyColorTemperature(processedImage, 25);
+      }
+
+      if (lowerPrompt.contains('cool') || lowerPrompt.contains('blue')) {
+        processedImage = _applyColorTemperature(processedImage, -25);
+      }
+
+      if (lowerPrompt.contains('vintage') || lowerPrompt.contains('old')) {
+        processedImage = _applySepia(processedImage);
+      }
+
+      if (lowerPrompt.contains('sharp') || lowerPrompt.contains('clear')) {
+        processedImage = _applySharpening(processedImage);
+      }
+
+      final resultBytes =
+          Uint8List.fromList(img.encodeJpg(processedImage, quality: 95));
+      _pushHistory(resultBytes);
+
+      emit(state.copyWith(
+        status: EditorStatus.success,
+        editedBytes: resultBytes,
+        message: 'Text edit applied: "$prompt"',
+        isProcessing: false,
+      ));
     } catch (e) {
-      emit(state.copyWith(status: EditorStatus.error, message: e.toString()));
+      emit(state.copyWith(
+        status: EditorStatus.error,
+        message: 'Text edit failed: ${e.toString()}',
+        isProcessing: false,
+      ));
     }
-  }
-
-  // ----------------- Analysis Helpers (scene/emotion) ------------------------
-  Future<String> detectScene() async {
-    if (state.editedBytes == null) return 'unknown';
-    final img.Image? src = img.decodeImage(state.editedBytes!);
-    if (src == null) return 'unknown';
-    int bright = 0, green = 0, blue = 0;
-    for (int y = 0; y < src.height; y += src.height ~/ 10 + 1) {
-      for (int x = 0; x < src.width; x += src.width ~/ 10 + 1) {
-        final p = src.getPixel(x, y);
-        bright += (p.r + p.g + p.b) ~/ 3;
-        green += p.g;
-        blue += p.b;
-      }
-    }
-    if (green > blue && green > bright ~/ 2) return 'nature';
-    if (blue > green && blue > bright ~/ 2) return 'water/sky';
-    if (bright > 200 * 10) return 'bright/indoor';
-    return 'general';
-  }
-
-  Future<String> detectDominantEmotion() async {
-    return 'neutral';
-  }
-
-  // ----------------- Batch / Export ----------------------------------------
-  Future<List<Uint8List>> applyBatch(
-    List<Uint8List> inputs,
-    Future<Uint8List> Function(Uint8List) op,
-  ) async {
-    final List<Uint8List> results = [];
-    for (final b in inputs) {
-      final Uint8List out = await op(b);
-      results.add(out);
-    }
-    return results;
-  }
-
-  Future<Uint8List> exportImage(
-    Uint8List bytes, {
-    ExportFormat format = ExportFormat.jpeg,
-    int quality = 90,
-  }) async {
-    final img.Image? src = img.decodeImage(bytes);
-    if (src == null) throw Exception('Invalid image for export');
-    switch (format) {
-      case ExportFormat.png:
-        return Uint8List.fromList(img.encodePng(src));
-      case ExportFormat.webp:
-        try {
-          return Uint8List.fromList(img.encodePng(src));
-        } catch (_) {
-          return Uint8List.fromList(img.encodeJpg(src, quality: quality));
-        }
-      case ExportFormat.jpeg:
-      default:
-        return Uint8List.fromList(img.encodeJpg(src, quality: quality));
-    }
-  }
-
-  // ----------------- Utility / Misc ---------------------------------------
-  Future<List<String>> suggestEdits() async {
-    final scene = await detectScene();
-    if (scene == 'nature') return ['forest_green', 'vignette', 'autoEnhance'];
-    if (scene == 'water/sky') return ['gedeo_warm', 'autoEnhance'];
-    if (scene == 'bright/indoor') return ['bw_classic', 'autoEnhance'];
-    return ['autoEnhance'];
   }
 }
