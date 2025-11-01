@@ -1,0 +1,37 @@
+Folder/File,Purpose,Photo Editor Example
+#1lib/core/ (Foundation and Services)
+The glue that holds the application together. This layer should be the first to initialize. config/app_constants.dart,Global configuration values.,Defines the base URL for the Gemini API (GEMINI_BASE_URL) or default image aspect ratios (DEFAULT_ASPECT_RATIO).
+error/failures.dart,Base classes for errors across the application.,"ServerFailure (e.g., API 404/500 errors), CacheFailure (e.g., failed to retrieve local API key), PromptSafetyFailure."
+utils/,Helper functions that don't belong to any specific feature.,"Base64Converter.dart (utility to handle conversion of image bytes from API response to a format Flutter can display), InputValidator.dart."
+services/di_container.dart,"(Dependency Injection setup, e.g., using get_it or Provider).",Registers the concrete implementations of repositories and data sources so they can be provided to the features layer.
+#2 lib/domain/ (The Business Logic: What the App Does)
+This is the most critical part, as it dictates the app's functionality without knowing how it's implemented.
+. Folder/File,Purpose,Photo Editor Example
+entities/,Plain Dart objects representing data in its ideal state.,"ImagePrompt.dart: Stores the user's prompt text, modifiers, and optional base image data.  GeneratedResult.dart: Stores the final image path/bytes and any associated metadata (like cost/time)."
+repositories/,Abstract contracts (interfaces) that define available actions.,"abstract class AiImageRepository { ... }: Defines methods like Future<Either<Failure, GeneratedResult>> generateImage(ImagePrompt prompt);"
+usecases/,"Single, focused actions (the business rules). Each file is typically one class.","GenerateImageUsecase.dart: Takes an ImagePrompt, calls the AiImageRepository.generateImage(), and returns the result. This isolates the core app logic."
+
+#3 lib/data/ (Implementation: How the App Works)
+This layer deals with external resources (APIs, databases) and maps them to the domain objects
+Folder/File,Purpose,Photo Editor Example
+models/,Data models specific to serialization/APIs.,"AiPromptRequestModel.dart: How the prompt data is structured when sent to the Gemini API ({ ""prompt"": ""..."", ""config"": { ... } }).  AiResponseModel.dart: How the API response is structured (used for fromJson)."
+datasources/,Concrete classes that handle single external connections.,"ai_remote_datasource.dart: Contains the actual http.post call to the Gemini/Imagen API endpoint, including key header setup and raw response handling.  api_key_local_source.dart: Uses a local storage solution (like shared_preferences or hive) to securely read and write the user's API key."
+repositories/,The concrete implementation of the domain repository contract.,"ai_image_repository_impl.dart: This class implements AiImageRepository. It calls methods from AiRemoteDataSource and handles mapping errors (e.g., converting a 403 API response into a ServerFailure object)."
+
+#4 lib/features/ (Presentation & UI Layer)
+This is where the user interacts. We organize everything by the user-facing feature.
+
+Folder/File,Purpose,Photo Editor Example
+screens/editor_screen.dart,"The main screen, handling layout and orchestration.","Uses BlocBuilder or Consumer (depending on state management) to listen to the EditorState and show the image, prompt input, or a loading spinner."
+presentation/bloc/ (or cubit/ or provider/),State Management for the specific feature.,"editor_cubit.dart: Contains methods like submitPrompt(promptText) which calls the GenerateImageUsecase and emits states: EditorLoadingState, EditorSuccessState(GeneratedResult), EditorErrorState(Failure)."
+presentation/bloc/editor_state.dart,The different states the screen can be in.,"EditorInitial, EditorLoading, EditorSuccess, EditorFailure."
+widgets/,UI components specific to the editor screen.,"PromptInputWidget.dart, ImageResultDisplay.dart, BeforeAfterSlider.dart, StyleModifierChip.dart."
+
+#5 ib/shared/ (Truly Global Widgets)
+Components and styles that are genuinely used across multiple, separate features (e.g., in both editor and settings).
+Folder/File,Purpose,Photo Editor Example
+widgets/,"Common, theme-agnostic UI elements.","AppButton.dart (A stylized button used everywhere), CustomSnackbar.dart, EmptyStatePlaceholder.dart."
+styles/,Reusable theme data and typography settings.,"AppTextStyles.dart, AppColors.dart, AppTheme.dart."
+
+
+
