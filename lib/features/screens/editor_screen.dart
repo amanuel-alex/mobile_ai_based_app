@@ -1,4 +1,3 @@
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:image_picker/image_picker.dart';
@@ -280,9 +279,9 @@ class _EditorScreenState extends State<EditorScreen> {
             padding: const EdgeInsets.all(20),
             child: Column(
               children: [
-                Row(
+                const Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: const [
+                  children: [
                     Text(
                       'Before',
                       style: TextStyle(
@@ -321,13 +320,13 @@ class _EditorScreenState extends State<EditorScreen> {
 
     return Container(
       height: 70,
-      decoration: BoxDecoration(
+      decoration: const BoxDecoration(
         color: Colors.white,
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.1),
+            color: Color.fromRGBO(0, 0, 0, 0.1),
             blurRadius: 8,
-            offset: const Offset(0, -2),
+            offset: Offset(0, -2),
           ),
         ],
       ),
@@ -435,8 +434,8 @@ class _EditorScreenState extends State<EditorScreen> {
       child: ListTile(
         leading: Container(
           padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: color.withOpacity(0.1),
+          decoration: const BoxDecoration(
+            color: Color.fromRGBO(0, 0, 0, 0.1),
             shape: BoxShape.circle,
           ),
           child: Icon(icon, color: color),
@@ -500,11 +499,11 @@ class _EditorScreenState extends State<EditorScreen> {
             color: isSelected ? Colors.blue : Colors.grey.shade300,
             width: isSelected ? 2 : 1,
           ),
-          boxShadow: [
+          boxShadow: const [
             BoxShadow(
-              color: Colors.black.withOpacity(0.1),
+              color: Color.fromRGBO(0, 0, 0, 0.1),
               blurRadius: 4,
-              offset: const Offset(0, 2),
+              offset: Offset(0, 2),
             ),
           ],
         ),
@@ -518,7 +517,7 @@ class _EditorScreenState extends State<EditorScreen> {
                 color: filter['color'] as Color? ?? Colors.grey,
                 shape: BoxShape.circle,
               ),
-              child: Icon(
+              child: const Icon(
                 Icons.filter_vintage,
                 color: Colors.white,
                 size: 20,
@@ -736,8 +735,8 @@ class _EditorScreenState extends State<EditorScreen> {
       child: ListTile(
         leading: Container(
           padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: color.withOpacity(0.1),
+          decoration: const BoxDecoration(
+            color: Color.fromRGBO(0, 0, 0, 0.1),
             shape: BoxShape.circle,
           ),
           child: Icon(icon, color: color),
