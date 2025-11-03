@@ -262,77 +262,57 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
+  // Add this variable to your state class
+  bool _showOriginal = false;
+
+// Update the build method
   Widget _buildImageComparison(EditorState state) {
     return Stack(
       children: [
-        // After image (full)
+        // Show either original or edited based on toggle
         Positioned.fill(
           child: Image.memory(
-            state.editedBytes! as Uint8List,
+            _showOriginal ? state.originalBytes! : state.editedBytes!,
             fit: BoxFit.contain,
           ),
         ),
 
-        // Before image (revealed by slider)
-        if (state.originalBytes != null)
-          Positioned.fill(
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: SizedBox(
-                width: MediaQuery.of(context).size.width * _split,
-                child: Image.memory(
-                  state.originalBytes! as Uint8List,
-                  fit: BoxFit.contain,
-                ),
-              ),
-            ),
-          ),
-
-        // Slider overlay
+        // Simple toggle button instead of slider
         Positioned(
-          bottom: 0,
-          left: 0,
-          right: 0,
-          child: Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  Colors.transparent,
-                  Colors.black.withOpacity(0.7),
-                ],
-              ),
-            ),
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              children: [
-                const Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Before',
-                      style: TextStyle(
-                          color: Colors.white, fontWeight: FontWeight.w500),
-                    ),
-                    Text(
-                      'After',
-                      style: TextStyle(
-                          color: Colors.white, fontWeight: FontWeight.w500),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Slider(
-                  value: _split,
-                  onChanged: (value) => setState(() => _split = value),
-                  activeColor: Colors.white,
-                  inactiveColor: Colors.white38,
-                ),
-              ],
+          bottom: 20,
+          right: 20,
+          child: FloatingActionButton.small(
+            onPressed: () => setState(() => _showOriginal = !_showOriginal),
+            backgroundColor: Colors.black54,
+            tooltip: _showOriginal ? 'Show edited' : 'Show original',
+            child: Icon(
+              _showOriginal ? Icons.visibility : Icons.visibility_off,
+              color: Colors.white,
             ),
           ),
         ),
+
+        // Optional: Show label indicating which image is visible
+        if (_showOriginal)
+          Positioned(
+            top: 20,
+            right: 20,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: const Text(
+                'Original',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ),
       ],
     );
   }

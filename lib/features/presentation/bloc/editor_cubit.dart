@@ -734,19 +734,19 @@ class EditorCubit extends Cubit<EditorState> {
         processingProgress: 0.1,
       ));
 
-      // Process the image with new background color
       final img.Image? originalImage = img.decodeImage(state.originalBytes!);
       if (originalImage == null) throw Exception('Unable to decode image');
 
-      img.Image processedImage = img.copyResize(
-        originalImage,
-        width: originalImage.width,
-        height: originalImage.height,
-      );
+      img.Image processedImage;
 
-      // Apply background color (this is a simplified implementation)
-      // In a real app, you'd use more advanced background removal/replacement
-      processedImage = _applyBackgroundColor(processedImage, color);
+      // Check if image has transparency
+      if (_hasTransparency(originalImage)) {
+        // If image has transparency, fill transparent areas with the new color
+        processedImage = _fillTransparentAreas(originalImage, color);
+      } else {
+        // If no transparency, apply color overlay effect
+        processedImage = _applyColorOverlay(originalImage, color);
+      }
 
       final resultBytes =
           Uint8List.fromList(img.encodeJpg(processedImage, quality: 95));
@@ -759,7 +759,7 @@ class EditorCubit extends Cubit<EditorState> {
         processingProgress: 1.0,
         backgroundColor: color,
         isBackgroundTransparent: false,
-        message: 'Background color changed to ${_colorToHex(color)}',
+        message: 'Background color changed',
       ));
     } catch (e) {
       emit(state.copyWith(
@@ -783,15 +783,14 @@ class EditorCubit extends Cubit<EditorState> {
       final img.Image? originalImage = img.decodeImage(state.originalBytes!);
       if (originalImage == null) throw Exception('Unable to decode image');
 
-      img.Image processedImage = img.copyResize(
-        originalImage,
-        width: originalImage.width,
-        height: originalImage.height,
-      );
+      img.Image processedImage;
 
-      // Apply background blur
-      final radius = (intensity.clamp(0.0, 1.0) * 25).toInt();
-      processedImage = img.gaussianBlur(processedImage, radius: radius);
+      // Apply blur effect based on image type
+      if (_hasTransparency(originalImage)) {
+        processedImage = _blurBackgroundAreas(originalImage, intensity);
+      } else {
+        processedImage = _applyOverallBlur(originalImage, intensity);
+      }
 
       final resultBytes =
           Uint8List.fromList(img.encodeJpg(processedImage, quality: 95));
@@ -804,8 +803,7 @@ class EditorCubit extends Cubit<EditorState> {
         processingProgress: 1.0,
         backgroundBlurIntensity: intensity,
         isBackgroundTransparent: false,
-        message:
-            'Background blur applied with ${(intensity * 100).round()}% intensity',
+        message: 'Background blur applied',
       ));
     } catch (e) {
       emit(state.copyWith(
@@ -829,17 +827,18 @@ class EditorCubit extends Cubit<EditorState> {
       final img.Image? originalImage = img.decodeImage(state.originalBytes!);
       if (originalImage == null) throw Exception('Unable to decode image');
 
-      img.Image processedImage = img.copyResize(
-        originalImage,
-        width: originalImage.width,
-        height: originalImage.height,
-      );
+      img.Image processedImage;
 
-      // Simple transparency effect (this is a basic implementation)
-      processedImage = _applyTransparencyEffect(processedImage);
+      if (_hasTransparency(originalImage)) {
+        // Already has transparency, just enhance it
+        processedImage = _enhanceTransparency(originalImage);
+      } else {
+        // Create transparency by detecting and removing background
+        processedImage = _removeBackground(originalImage);
+      }
 
-      final resultBytes = Uint8List.fromList(
-          img.encodePng(processedImage)); // Use PNG for transparency
+      // Use PNG format to preserve transparency
+      final resultBytes = Uint8List.fromList(img.encodePng(processedImage));
       _pushHistory(resultBytes);
 
       emit(state.copyWith(
@@ -849,13 +848,15 @@ class EditorCubit extends Cubit<EditorState> {
         processingProgress: 1.0,
         isBackgroundTransparent: true,
         backgroundColor: null,
-        message: 'Background made transparent',
+        message: _hasTransparency(originalImage)
+            ? 'Transparency enhanced'
+            : 'Background removal applied',
       ));
     } catch (e) {
       emit(state.copyWith(
         status: EditorStatus.error,
         isProcessing: false,
-        message: 'Failed to make background transparent: ${e.toString()}',
+        message: 'Failed to apply transparency: ${e.toString()}',
       ));
     }
   }
@@ -873,7 +874,7 @@ class EditorCubit extends Cubit<EditorState> {
         backgroundBlurIntensity: 0.0,
         isBackgroundTransparent: false,
         status: EditorStatus.success,
-        message: 'Background removed successfully',
+        message: 'Background effects removed - restored to original',
       ));
     } catch (e) {
       emit(state.copyWith(
@@ -883,84 +884,192 @@ class EditorCubit extends Cubit<EditorState> {
     }
   }
 
-// Helper method to apply background color
-  // Helper method to apply background color
-  img.Image _applyBackgroundColor(img.Image image, Color color) {
-    // Create a new image with the background color
-    final background = img.Image.from(image);
-
-    // Convert Color to individual RGB components
-    final bgRed = color.red;
-    final bgGreen = color.green;
-    final bgBlue = color.blue;
-
-    // Fill with background color
-    for (int y = 0; y < background.height; y++) {
-      for (int x = 0; x < background.width; x++) {
-        background.setPixelRgba(x, y, bgRed, bgGreen, bgBlue, 255);
-      }
-    }
-
-    // Blend original image over background (simple alpha blending)
-    for (int y = 0; y < image.height; y++) {
-      for (int x = 0; x < image.width; x++) {
-        final originalPixel = image.getPixel(x, y);
-        final originalRed = originalPixel.r.toInt();
-        final originalGreen = originalPixel.g.toInt();
-        final originalBlue = originalPixel.b.toInt();
-        final originalAlpha = originalPixel.a.toInt();
-
-        // If pixel has sufficient opacity, use it instead of background
-        if (originalAlpha > 100) {
-          // Adjust threshold as needed
-          background.setPixelRgba(
-              x, y, originalRed, originalGreen, originalBlue, originalAlpha);
-        }
-      }
-    }
-
-    return background;
-  }
-
-// Helper method to apply transparency effect
-  img.Image _applyTransparencyEffect(img.Image image) {
-    // Simple transparency by reducing opacity of certain colors
-    // This is a basic implementation - real background removal would be more complex
+  // Helper method to check if image has transparency
+  bool _hasTransparency(img.Image image) {
     for (int y = 0; y < image.height; y++) {
       for (int x = 0; x < image.width; x++) {
         final pixel = image.getPixel(x, y);
-
-        // Simple background detection (adjust thresholds as needed)
-        final brightness =
-            (0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b);
-        if (brightness > 200) {
-          // Very bright pixels (likely background)
-          final int newAlpha =
-              math.max(0, math.min(255, (pixel.a * 0.3).toInt())).toInt();
-          image.setPixelRgba(x, y, pixel.r, pixel.g, pixel.b, newAlpha);
+        if (pixel.a < 255) {
+          return true;
         }
       }
     }
-    return image;
+    return false;
   }
 
-  // Helper method for background processing simulation
-  void _simulateBackgroundProcessing(Function onComplete) {
-    const totalSteps = 8;
-    for (int i = 1; i <= totalSteps; i++) {
-      Future.delayed(Duration(milliseconds: i * 150), () {
-        if (i < totalSteps) {
-          emit(state.copyWith(processingProgress: i / totalSteps));
-        } else {
-          onComplete();
+// Fill transparent areas with solid color (for PNG images with transparency)
+  img.Image _fillTransparentAreas(img.Image image, Color color) {
+    final processedImage = img.Image.from(image);
+
+    for (int y = 0; y < processedImage.height; y++) {
+      for (int x = 0; x < processedImage.width; x++) {
+        final pixel = processedImage.getPixel(x, y);
+
+        // If pixel is transparent or semi-transparent, replace with background color
+        if (pixel.a < 250) {
+          processedImage.setPixelRgba(
+              x, y, color.red, color.green, color.blue, 255);
         }
-      });
+      }
     }
+
+    return processedImage;
   }
 
-  // Helper method to convert color to hex string
-  String _colorToHex(Color color) {
-    return '#${color.value.toRadixString(16).padLeft(8, '0').toUpperCase()}';
+// Apply color overlay for images without transparency
+  img.Image _applyColorOverlay(img.Image image, Color color) {
+    final processedImage = img.copyResize(
+      image,
+      width: image.width,
+      height: image.height,
+    );
+
+    // Create a color overlay effect
+    final overlayStrength = 0.3;
+
+    for (int y = 0; y < processedImage.height; y++) {
+      for (int x = 0; x < processedImage.width; x++) {
+        final pixel = processedImage.getPixel(x, y);
+        final red = pixel.r.toInt();
+        final green = pixel.g.toInt();
+        final blue = pixel.b.toInt();
+        final alpha = pixel.a.toInt();
+
+        // Blend with background color
+        final r = (red * (1 - overlayStrength) + color.red * overlayStrength)
+            .clamp(0, 255)
+            .toInt();
+        final g =
+            (green * (1 - overlayStrength) + color.green * overlayStrength)
+                .clamp(0, 255)
+                .toInt();
+        final b = (blue * (1 - overlayStrength) + color.blue * overlayStrength)
+            .clamp(0, 255)
+            .toInt();
+
+        processedImage.setPixelRgba(x, y, r, g, b, alpha);
+      }
+    }
+
+    return processedImage;
+  }
+
+// Blur only the background areas (for transparent images)
+  img.Image _blurBackgroundAreas(img.Image image, double intensity) {
+    final processedImage = img.Image.from(image);
+    final blurredImage =
+        img.gaussianBlur(processedImage, radius: (intensity * 15).toInt());
+
+    for (int y = 0; y < processedImage.height; y++) {
+      for (int x = 0; x < processedImage.width; x++) {
+        final originalPixel = processedImage.getPixel(x, y);
+        final blurPixel = blurredImage.getPixel(x, y);
+
+        // Only apply blur to transparent/semi-transparent areas (background)
+        if (originalPixel.a < 200) {
+          processedImage.setPixel(x, y, blurPixel);
+        }
+      }
+    }
+
+    return processedImage;
+  }
+
+// Apply blur to entire image (for opaque images)
+  img.Image _applyOverallBlur(img.Image image, double intensity) {
+    final radius = (intensity.clamp(0.0, 1.0) * 20).toInt();
+    return img.gaussianBlur(image, radius: radius);
+  }
+
+// Enhance existing transparency
+  img.Image _enhanceTransparency(img.Image image) {
+    final processedImage = img.Image.from(image);
+
+    for (int y = 0; y < processedImage.height; y++) {
+      for (int x = 0; x < processedImage.width; x++) {
+        final pixel = processedImage.getPixel(x, y);
+
+        // Make semi-transparent areas more transparent
+        if (pixel.a < 200) {
+          final newAlpha = (pixel.a * 0.7).clamp(0, 255).toInt();
+          processedImage.setPixelRgba(x, y, pixel.r.toInt(), pixel.g.toInt(),
+              pixel.b.toInt(), newAlpha);
+        }
+      }
+    }
+
+    return processedImage;
+  }
+
+// Remove background from opaque images (basic implementation)
+  img.Image _removeBackground(img.Image image) {
+    final processedImage = img.Image.from(image);
+
+    // Simple background removal based on edge detection and color analysis
+    // This is a basic implementation - real background removal would be more complex
+
+    // First, detect edges to identify main subject
+    final edges = _detectEdges(image);
+
+    for (int y = 0; y < processedImage.height; y++) {
+      for (int x = 0; x < processedImage.width; x++) {
+        final pixel = processedImage.getPixel(x, y);
+
+        // If it's likely background (based on simple heuristics), make it transparent
+        if (_isLikelyBackground(pixel, edges, x, y)) {
+          processedImage.setPixelRgba(
+              x, y, pixel.r.toInt(), pixel.g.toInt(), pixel.b.toInt(), 50);
+        }
+      }
+    }
+
+    return processedImage;
+  }
+
+// Simple edge detection
+  List<List<bool>> _detectEdges(img.Image image) {
+    final edges =
+        List.generate(image.height, (_) => List.filled(image.width, false));
+    final grayscale = img.grayscale(img.Image.from(image));
+
+    for (int y = 1; y < image.height - 1; y++) {
+      for (int x = 1; x < image.width - 1; x++) {
+        final current = grayscale.getPixel(x, y).luminance;
+        final right = grayscale.getPixel(x + 1, y).luminance;
+        final bottom = grayscale.getPixel(x, y + 1).luminance;
+
+        // Simple edge detection: significant luminance change
+        if ((current - right).abs() > 30 || (current - bottom).abs() > 30) {
+          edges[y][x] = true;
+        }
+      }
+    }
+
+    return edges;
+  }
+
+// Simple background detection
+  bool _isLikelyBackground(
+      img.Pixel pixel, List<List<bool>> edges, int x, int y) {
+    final brightness = (0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b);
+
+    // Likely background if:
+    // 1. Very bright or very dark areas
+    // 2. Not near edges
+    // 3. Has uniform color characteristics
+
+    final isEdge = edges[y][x];
+    final isVeryBright = brightness > 200;
+    final isVeryDark = brightness < 50;
+    final hasLowSaturation = _getSaturation(pixel) < 0.2;
+
+    return !isEdge && (isVeryBright || isVeryDark || hasLowSaturation);
+  }
+
+  double _getSaturation(img.Pixel pixel) {
+    final maxVal = [pixel.r, pixel.g, pixel.b].reduce((a, b) => a > b ? a : b);
+    final minVal = [pixel.r, pixel.g, pixel.b].reduce((a, b) => a < b ? a : b);
+    return maxVal == 0 ? 0 : (maxVal - minVal) / maxVal;
   }
 
   // === IMAGE ANALYSIS ===
