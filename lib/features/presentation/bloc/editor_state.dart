@@ -1,18 +1,18 @@
 import 'dart:typed_data';
+import 'package:equatable/equatable.dart';
+import 'package:flutter/material.dart';
 
-enum EditorStatus {
-  initial,
-  loading,
-  ready,
-  success,
-  error,
-}
-
-class EditorState {
-  final EditorStatus status;
+class EditorState extends Equatable {
   final Uint8List? originalBytes;
   final Uint8List? editedBytes;
+  final EditorStatus status;
   final String? message;
+  final bool isProcessing;
+  final double processingProgress;
+  final bool canUndo;
+  final bool canRedo;
+
+  // Adjustment properties
   final double brightness;
   final double contrast;
   final double saturation;
@@ -23,20 +23,31 @@ class EditorState {
   final double sharpness;
   final double vignette;
   final double blur;
+
+  // Filter properties
   final String? appliedFilterId;
+
+  // Overlay properties
   final String? overlay;
-  final bool canUndo;
-  final bool canRedo;
+
+  // File properties
   final String? fileName;
   final int? fileSize;
-  final bool isProcessing;
-  final double processingProgress;
+
+  // Background properties
+  final Color? backgroundColor;
+  final double backgroundBlurIntensity;
+  final bool isBackgroundTransparent;
 
   const EditorState({
-    this.status = EditorStatus.initial,
     this.originalBytes,
     this.editedBytes,
+    this.status = EditorStatus.initial,
     this.message,
+    this.isProcessing = false,
+    this.processingProgress = 0.0,
+    this.canUndo = false,
+    this.canRedo = false,
     this.brightness = 0.0,
     this.contrast = 0.0,
     this.saturation = 0.0,
@@ -49,19 +60,22 @@ class EditorState {
     this.blur = 0.0,
     this.appliedFilterId,
     this.overlay,
-    this.canUndo = false,
-    this.canRedo = false,
     this.fileName,
     this.fileSize,
-    this.isProcessing = false,
-    this.processingProgress = 0.0,
+    this.backgroundColor,
+    this.backgroundBlurIntensity = 0.0,
+    this.isBackgroundTransparent = false,
   });
 
   EditorState copyWith({
-    EditorStatus? status,
     Uint8List? originalBytes,
     Uint8List? editedBytes,
+    EditorStatus? status,
     String? message,
+    bool? isProcessing,
+    double? processingProgress,
+    bool? canUndo,
+    bool? canRedo,
     double? brightness,
     double? contrast,
     double? saturation,
@@ -74,18 +88,21 @@ class EditorState {
     double? blur,
     String? appliedFilterId,
     String? overlay,
-    bool? canUndo,
-    bool? canRedo,
     String? fileName,
     int? fileSize,
-    bool? isProcessing,
-    double? processingProgress,
+    Color? backgroundColor,
+    double? backgroundBlurIntensity,
+    bool? isBackgroundTransparent,
   }) {
     return EditorState(
-      status: status ?? this.status,
       originalBytes: originalBytes ?? this.originalBytes,
       editedBytes: editedBytes ?? this.editedBytes,
+      status: status ?? this.status,
       message: message ?? this.message,
+      isProcessing: isProcessing ?? this.isProcessing,
+      processingProgress: processingProgress ?? this.processingProgress,
+      canUndo: canUndo ?? this.canUndo,
+      canRedo: canRedo ?? this.canRedo,
       brightness: brightness ?? this.brightness,
       contrast: contrast ?? this.contrast,
       saturation: saturation ?? this.saturation,
@@ -98,12 +115,50 @@ class EditorState {
       blur: blur ?? this.blur,
       appliedFilterId: appliedFilterId ?? this.appliedFilterId,
       overlay: overlay ?? this.overlay,
-      canUndo: canUndo ?? this.canUndo,
-      canRedo: canRedo ?? this.canRedo,
       fileName: fileName ?? this.fileName,
       fileSize: fileSize ?? this.fileSize,
-      isProcessing: isProcessing ?? this.isProcessing,
-      processingProgress: processingProgress ?? this.processingProgress,
+      backgroundColor: backgroundColor ?? this.backgroundColor,
+      backgroundBlurIntensity:
+          backgroundBlurIntensity ?? this.backgroundBlurIntensity,
+      isBackgroundTransparent:
+          isBackgroundTransparent ?? this.isBackgroundTransparent,
     );
   }
+
+  @override
+  List<Object?> get props => [
+        originalBytes,
+        editedBytes,
+        status,
+        message,
+        isProcessing,
+        processingProgress,
+        canUndo,
+        canRedo,
+        brightness,
+        contrast,
+        saturation,
+        exposure,
+        warmth,
+        highlights,
+        shadows,
+        sharpness,
+        vignette,
+        blur,
+        appliedFilterId,
+        overlay,
+        fileName,
+        fileSize,
+        backgroundColor,
+        backgroundBlurIntensity,
+        isBackgroundTransparent,
+      ];
+}
+
+enum EditorStatus {
+  initial,
+  loading,
+  processing,
+  success,
+  error,
 }

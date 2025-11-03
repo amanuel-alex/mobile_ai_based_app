@@ -1,6 +1,9 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:mobile_ai_photo_editor/features/editor/background_panel.dart';
 import 'package:mobile_ai_photo_editor/features/presentation/bloc/editor_cubit.dart';
 import 'package:mobile_ai_photo_editor/features/presentation/bloc/editor_state.dart';
 import '../../../shared/widgets/app_button.dart';
@@ -19,7 +22,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
   // Effect values
   double _blurIntensity = 0.5;
-  bool _isTiltShift = false;
+  final bool _isTiltShift = false;
 
   final ImagePicker _picker = ImagePicker();
 
@@ -141,7 +144,8 @@ class _EditorScreenState extends State<EditorScreen> {
         InteractiveViewer(
           panEnabled: true,
           scaleEnabled: true,
-          child: Image.memory(state.editedBytes!, fit: BoxFit.contain),
+          child: Image.memory(state.editedBytes! as Uint8List,
+              fit: BoxFit.contain),
         ),
         Positioned(
           top: 40,
@@ -264,7 +268,7 @@ class _EditorScreenState extends State<EditorScreen> {
         // After image (full)
         Positioned.fill(
           child: Image.memory(
-            state.editedBytes!,
+            state.editedBytes! as Uint8List,
             fit: BoxFit.contain,
           ),
         ),
@@ -277,7 +281,7 @@ class _EditorScreenState extends State<EditorScreen> {
               child: SizedBox(
                 width: MediaQuery.of(context).size.width * _split,
                 child: Image.memory(
-                  state.originalBytes!,
+                  state.originalBytes! as Uint8List,
                   fit: BoxFit.contain,
                 ),
               ),
@@ -339,6 +343,11 @@ class _EditorScreenState extends State<EditorScreen> {
       {'id': 'filters', 'icon': Icons.filter_vintage, 'label': 'Filters'},
       {'id': 'adjust', 'icon': Icons.tune, 'label': 'Adjust'},
       {'id': 'effects', 'icon': Icons.blur_on, 'label': 'Effects'},
+      {
+        'id': 'background',
+        'icon': Icons.find_replace,
+        'label': 'Background'
+      }, // Add this line
       {'id': 'tools', 'icon': Icons.build, 'label': 'Tools'},
     ];
 
@@ -392,6 +401,9 @@ class _EditorScreenState extends State<EditorScreen> {
         return _buildAdjustPanel(context, state);
       case 'effects':
         return _buildEffectsPanel(context, state);
+      case 'background': // Add this case
+        // ignore: prefer_const_constructors
+        return BackgroundPanel();
       case 'tools':
         return _buildToolsPanel(context, state);
       default:

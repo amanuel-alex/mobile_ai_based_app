@@ -4,6 +4,7 @@ import 'dart:async';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
+import 'package:flutter/material.dart';
 import 'editor_state.dart';
 
 class _ImageAnalysis {
@@ -25,6 +26,7 @@ class EditorCubit extends Cubit<EditorState> {
 
   final ImagePicker _picker = ImagePicker();
   final List<Uint8List> _history = [];
+  final List<Uint8List> _redoStack = [];
   int _historyIndex = -1;
   static const int _maxHistorySize = 20;
 
@@ -49,7 +51,7 @@ class EditorCubit extends Cubit<EditorState> {
       _pushHistory(bytes);
 
       emit(state.copyWith(
-        status: EditorStatus.ready,
+        status: EditorStatus.success,
         originalBytes: bytes,
         editedBytes: bytes,
         fileName: file.name,
@@ -84,7 +86,7 @@ class EditorCubit extends Cubit<EditorState> {
       _pushHistory(bytes);
 
       emit(state.copyWith(
-        status: EditorStatus.ready,
+        status: EditorStatus.success,
         originalBytes: bytes,
         editedBytes: bytes,
         fileName: file.name,
@@ -126,25 +128,27 @@ class EditorCubit extends Cubit<EditorState> {
     if (_historyIndex > 0) {
       _historyIndex--;
       final bytes = _history[_historyIndex];
+      _redoStack.add(bytes);
       emit(state.copyWith(
         editedBytes: bytes,
-        status: EditorStatus.ready,
+        status: EditorStatus.success,
         canUndo: _historyIndex > 0,
-        canRedo: _historyIndex < _history.length - 1,
+        canRedo: true,
         message: 'Undo successful',
       ));
     }
   }
 
   void redo() {
-    if (_historyIndex < _history.length - 1) {
-      _historyIndex++;
-      final bytes = _history[_historyIndex];
+    if (_redoStack.isNotEmpty) {
+      final bytes = _redoStack.removeLast();
+      _history.add(bytes);
+      _historyIndex = _history.length - 1;
       emit(state.copyWith(
         editedBytes: bytes,
-        status: EditorStatus.ready,
-        canUndo: _historyIndex > 0,
-        canRedo: _historyIndex < _history.length - 1,
+        status: EditorStatus.success,
+        canUndo: true,
+        canRedo: _redoStack.isNotEmpty,
         message: 'Redo successful',
       ));
     }
@@ -719,6 +723,246 @@ class EditorCubit extends Cubit<EditorState> {
     return image;
   }
 
+  // === BACKGROUND METHODS ===
+  Future<void> changeBackgroundColor(Color color) async {
+    try {
+      if (state.originalBytes == null) return;
+
+      emit(state.copyWith(
+        status: EditorStatus.processing,
+        isProcessing: true,
+        processingProgress: 0.1,
+      ));
+
+      // Process the image with new background color
+      final img.Image? originalImage = img.decodeImage(state.originalBytes!);
+      if (originalImage == null) throw Exception('Unable to decode image');
+
+      img.Image processedImage = img.copyResize(
+        originalImage,
+        width: originalImage.width,
+        height: originalImage.height,
+      );
+
+      // Apply background color (this is a simplified implementation)
+      // In a real app, you'd use more advanced background removal/replacement
+      processedImage = _applyBackgroundColor(processedImage, color);
+
+      final resultBytes =
+          Uint8List.fromList(img.encodeJpg(processedImage, quality: 95));
+      _pushHistory(resultBytes);
+
+      emit(state.copyWith(
+        status: EditorStatus.success,
+        editedBytes: resultBytes,
+        isProcessing: false,
+        processingProgress: 1.0,
+        backgroundColor: color,
+        isBackgroundTransparent: false,
+        message: 'Background color changed to ${_colorToHex(color)}',
+      ));
+    } catch (e) {
+      emit(state.copyWith(
+        status: EditorStatus.error,
+        isProcessing: false,
+        message: 'Failed to change background color: ${e.toString()}',
+      ));
+    }
+  }
+
+  Future<void> applyBackgroundBlur(double intensity) async {
+    try {
+      if (state.originalBytes == null) return;
+
+      emit(state.copyWith(
+        status: EditorStatus.processing,
+        isProcessing: true,
+        processingProgress: 0.1,
+      ));
+
+      final img.Image? originalImage = img.decodeImage(state.originalBytes!);
+      if (originalImage == null) throw Exception('Unable to decode image');
+
+      img.Image processedImage = img.copyResize(
+        originalImage,
+        width: originalImage.width,
+        height: originalImage.height,
+      );
+
+      // Apply background blur
+      final radius = (intensity.clamp(0.0, 1.0) * 25).toInt();
+      processedImage = img.gaussianBlur(processedImage, radius: radius);
+
+      final resultBytes =
+          Uint8List.fromList(img.encodeJpg(processedImage, quality: 95));
+      _pushHistory(resultBytes);
+
+      emit(state.copyWith(
+        status: EditorStatus.success,
+        editedBytes: resultBytes,
+        isProcessing: false,
+        processingProgress: 1.0,
+        backgroundBlurIntensity: intensity,
+        isBackgroundTransparent: false,
+        message:
+            'Background blur applied with ${(intensity * 100).round()}% intensity',
+      ));
+    } catch (e) {
+      emit(state.copyWith(
+        status: EditorStatus.error,
+        isProcessing: false,
+        message: 'Failed to apply background blur: ${e.toString()}',
+      ));
+    }
+  }
+
+  Future<void> makeBackgroundTransparent() async {
+    try {
+      if (state.originalBytes == null) return;
+
+      emit(state.copyWith(
+        status: EditorStatus.processing,
+        isProcessing: true,
+        processingProgress: 0.1,
+      ));
+
+      final img.Image? originalImage = img.decodeImage(state.originalBytes!);
+      if (originalImage == null) throw Exception('Unable to decode image');
+
+      img.Image processedImage = img.copyResize(
+        originalImage,
+        width: originalImage.width,
+        height: originalImage.height,
+      );
+
+      // Simple transparency effect (this is a basic implementation)
+      processedImage = _applyTransparencyEffect(processedImage);
+
+      final resultBytes = Uint8List.fromList(
+          img.encodePng(processedImage)); // Use PNG for transparency
+      _pushHistory(resultBytes);
+
+      emit(state.copyWith(
+        status: EditorStatus.success,
+        editedBytes: resultBytes,
+        isProcessing: false,
+        processingProgress: 1.0,
+        isBackgroundTransparent: true,
+        backgroundColor: null,
+        message: 'Background made transparent',
+      ));
+    } catch (e) {
+      emit(state.copyWith(
+        status: EditorStatus.error,
+        isProcessing: false,
+        message: 'Failed to make background transparent: ${e.toString()}',
+      ));
+    }
+  }
+
+  void removeBackground() {
+    try {
+      if (state.originalBytes == null) return;
+
+      // Reset to original image to remove background effects
+      _pushHistory(state.originalBytes!);
+
+      emit(state.copyWith(
+        editedBytes: state.originalBytes,
+        backgroundColor: null,
+        backgroundBlurIntensity: 0.0,
+        isBackgroundTransparent: false,
+        status: EditorStatus.success,
+        message: 'Background removed successfully',
+      ));
+    } catch (e) {
+      emit(state.copyWith(
+        status: EditorStatus.error,
+        message: 'Failed to remove background: ${e.toString()}',
+      ));
+    }
+  }
+
+// Helper method to apply background color
+  // Helper method to apply background color
+  img.Image _applyBackgroundColor(img.Image image, Color color) {
+    // Create a new image with the background color
+    final background = img.Image.from(image);
+
+    // Convert Color to individual RGB components
+    final bgRed = color.red;
+    final bgGreen = color.green;
+    final bgBlue = color.blue;
+
+    // Fill with background color
+    for (int y = 0; y < background.height; y++) {
+      for (int x = 0; x < background.width; x++) {
+        background.setPixelRgba(x, y, bgRed, bgGreen, bgBlue, 255);
+      }
+    }
+
+    // Blend original image over background (simple alpha blending)
+    for (int y = 0; y < image.height; y++) {
+      for (int x = 0; x < image.width; x++) {
+        final originalPixel = image.getPixel(x, y);
+        final originalRed = originalPixel.r.toInt();
+        final originalGreen = originalPixel.g.toInt();
+        final originalBlue = originalPixel.b.toInt();
+        final originalAlpha = originalPixel.a.toInt();
+
+        // If pixel has sufficient opacity, use it instead of background
+        if (originalAlpha > 100) {
+          // Adjust threshold as needed
+          background.setPixelRgba(
+              x, y, originalRed, originalGreen, originalBlue, originalAlpha);
+        }
+      }
+    }
+
+    return background;
+  }
+
+// Helper method to apply transparency effect
+  img.Image _applyTransparencyEffect(img.Image image) {
+    // Simple transparency by reducing opacity of certain colors
+    // This is a basic implementation - real background removal would be more complex
+    for (int y = 0; y < image.height; y++) {
+      for (int x = 0; x < image.width; x++) {
+        final pixel = image.getPixel(x, y);
+
+        // Simple background detection (adjust thresholds as needed)
+        final brightness =
+            (0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b);
+        if (brightness > 200) {
+          // Very bright pixels (likely background)
+          final int newAlpha =
+              math.max(0, math.min(255, (pixel.a * 0.3).toInt())).toInt();
+          image.setPixelRgba(x, y, pixel.r, pixel.g, pixel.b, newAlpha);
+        }
+      }
+    }
+    return image;
+  }
+
+  // Helper method for background processing simulation
+  void _simulateBackgroundProcessing(Function onComplete) {
+    const totalSteps = 8;
+    for (int i = 1; i <= totalSteps; i++) {
+      Future.delayed(Duration(milliseconds: i * 150), () {
+        if (i < totalSteps) {
+          emit(state.copyWith(processingProgress: i / totalSteps));
+        } else {
+          onComplete();
+        }
+      });
+    }
+  }
+
+  // Helper method to convert color to hex string
+  String _colorToHex(Color color) {
+    return '#${color.value.toRadixString(16).padLeft(8, '0').toUpperCase()}';
+  }
+
   // === IMAGE ANALYSIS ===
   _ImageAnalysis _analyzeImage(img.Image image) {
     double totalBrightness = 0;
@@ -782,7 +1026,10 @@ class EditorCubit extends Cubit<EditorState> {
         blur: 0.0,
         appliedFilterId: null,
         overlay: null,
-        status: EditorStatus.ready,
+        backgroundColor: null,
+        backgroundBlurIntensity: 0.0,
+        isBackgroundTransparent: false,
+        status: EditorStatus.success,
         message: 'Reset to original',
       ));
     }
@@ -809,6 +1056,7 @@ class EditorCubit extends Cubit<EditorState> {
 
   void clearAll() {
     _history.clear();
+    _redoStack.clear();
     _historyIndex = -1;
     emit(const EditorState());
   }
